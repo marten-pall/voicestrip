@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Review ' ~ review_id if review_id else 'Recorder' }} · Voice Collector{% endblock %}
+
+{% block content %}
+  <!-- Error banner -->
+  <div id="error" class="hidden rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+    <p id="error-title" class="font-semibold"></p>
+    <p id="error-detail" class="mt-1 text-red-700"></p>
+  </div>
+
+  <!-- Continue a recent recording -->
+  <section class="flex flex-wrap items-center gap-3 rounded-xl bg-white shadow-sm border border-slate-200 px-5 py-3 text-sm">
+    <label for="recent" class="font-medium text-slate-600">Jätka hiljuti salvestust</label>
+    <select id="recent"
+            class="h-9 min-w-[20rem] grow max-w-xl rounded-lg border border-slate-300 bg-white px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100">
+      <option value="">— vali salvestus —</option>
+    </select>
+    {% if review_id %}
+      <span class="rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-700">Review: <span class="font-mono">{{ review_id }}</span></span>
+    {% endif %}
+  </section>
+
+  <!-- Top bar -->
+  <section class="rounded-xl bg-white shadow-sm border border-slate-200 p-5">
+    <div class="flex flex-wrap items-end gap-4">
+      <label class="flex flex-col gap-1 text-sm">
+        <span class="text-slate-500 font-medium">Default label</span>
+        <select id="default-label"
+                class="h-10 rounded-lg border border-slate-300 bg-white px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"></select>
+      </label>
+
+      <label class="flex flex-col gap-1 text-sm grow min-w-[16rem]">
+        <span class="text-slate-500 font-medium">Recording name</span>
+        <input id="rec-name" type="text"
+               class="h-10 rounded-lg border border-slate-300 px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100 disabled:text-slate-500">
+      </label>
+
+      <button id="record-btn" type="button"
+              class="h-12 min-w-[9rem] rounded-xl bg-red-600 px-6 text-white font-semibold tracking-wide shadow-sm hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed">
+        ● RECORD
+      </button>
+
+      <div id="timer-box" class="flex flex-col items-start">
+        <span class="text-xs text-slate-500 font-medium">Time</span>
+        <span id="timer" class="font-mono text-2xl tabular-nums">00:00</span>
+      </div>
+    </div>
+
+    <p id="status" class="mt-3 text-sm text-slate-500">Press RECORD or the space bar to start.</p>
+    <div id="long-warning" class="hidden mt-3 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-sm text-amber-800">
+      Recording is longer than 10 minutes. Everything is kept in browser memory — consider stopping and starting a new recording.
+    </div>
+  </section>
+
+  <!-- Editor (shown after stop, or when reviewing an existing recording) -->
+  <section id="editor" class="hidden rounded-xl bg-white shadow-sm border border-slate-200 p-5 space-y-4">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div>
+        <h2 id="editor-title" class="font-semibold">Place 1-second boxes</h2>
+        <p id="rec-info" class="text-sm text-slate-500 font-mono"></p>
+      </div>
+      <div class="text-sm text-slate-500">
+        Playhead <span id="playhead-time" class="font-mono text-slate-900">0:00.00</span>
+        · <span id="box-count">0</span> new
+        · <span id="saved-count">0</span> saved
+      </div>
+    </div>
+
+    <div id="wave"></div>
+    <p id="editor-loading" class="text-sm text-slate-500">Processing recording…</p>
+
+    <div class="flex flex-wrap items-center gap-2">
+      <button id="add-box-btn" type="button"
+              class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-40">
+        + Add box
+      </button>
+      <button id="play-all-btn" type="button"
+              class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-40">
+        ▶ Play all
+      </button>
+      <span class="hidden items-center gap-2 text-xs text-slate-500 md:inline-flex">
+        <span class="inline-block h-3 w-5 rounded-sm border-2 border-dashed border-slate-400 bg-slate-200 opacity-60"></span> juba salvestatud
+        <span class="ml-2 inline-block h-3 w-5 rounded-sm border-2 border-indigo-500 bg-indigo-100"></span> uus
+      </span>
+      <div class="grow"></div>
+      <button id="discard-btn" type="button"
+              class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-red-50 hover:text-red-700 hover:border-red-200">
+        🗑 Discard recording
+      </button>
+      <button id="delete-all-btn" type="button"
+              class="hidden rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-red-50 hover:text-red-700 hover:border-red-200">
+        🗑 Kustuta originaal + kõik klipid
+      </button>
+      <button id="new-recording-btn" type="button"
+              class="hidden rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium hover:bg-slate-50">
+        🎙 Uus salvestus
+      </button>
+      <button id="accept-btn" type="button" disabled
+              class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed">
+        💾 Accept &amp; save all
+      </button>
+    </div>
+  </section>
+
+  <!-- Shortcuts -->
+  <section class="text-xs text-slate-500 flex flex-wrap gap-x-6 gap-y-1">
+    <span><kbd class="font-mono rounded border border-slate-300 bg-white px-1.5">Space</kbd> record / stop · play / pause</span>
+    <span><kbd class="font-mono rounded border border-slate-300 bg-white px-1.5">B</kbd> add box at playhead</span>
+    <span><kbd class="font-mono rounded border border-slate-300 bg-white px-1.5">Delete</kbd> delete selected box</span>
+    <span>Click the waveform to move the playhead · drag new boxes to position (0.05 s grid)</span>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  <script src="{{ url_for('static', filename='recorder.js') }}"></script>
+{% endblock %}

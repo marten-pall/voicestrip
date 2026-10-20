@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="et">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Voice Collector{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen antialiased">
+  <header class="bg-white border-b border-slate-200">
+    <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+      <a href="/" class="flex items-center gap-2 font-semibold">
+        <span class="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-600 text-white text-sm">🎙</span>
+        Voice Collector
+      </a>
+      <nav class="flex gap-1 text-sm">
+        {% set nav_items = [("recorder", "/", "Recorder"), ("playback", "/playback", "Playback")] %}
+        {% for key, href, text in nav_items %}
+          <a href="{{ href }}"
+             class="px-3 py-1.5 rounded-lg {{ 'bg-indigo-50 text-indigo-700 font-medium' if active == key else 'text-slate-600 hover:bg-slate-100' }}">
+            {{ text }}
+          </a>
+        {% endfor %}
+      </nav>
+    </div>
+  </header>
+
+  <main class="max-w-6xl mx-auto px-6 py-6 space-y-6">
+    {% block content %}{% endblock %}
+  </main>
+
+  <script>
+    window.APP = {
+      labels: {{ labels | tojson }},
+      colors: {{ label_colors | tojson }},
+      defaultLabel: {{ default_label | tojson }},
+      reviewId: {{ (review_id or none) | tojson }},
+    };
+  </script>
+  <script src="{{ url_for('static', filename='ui.js') }}"></script>
+  <script src="{{ url_for('static', filename='waveform.js') }}"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

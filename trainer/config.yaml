@@ -1,0 +1,79 @@
+# Voice command keyword spotter - training config.
+# Every key is required (no hidden defaults in code). Relative paths are resolved
+# against the trainer/ folder, so the commands work from any working directory.
+# Override any key from the CLI:  python train.py --config config.yaml -o training.epochs=2
+# Variant configs (configs/*.yaml) start with `base: ../config.yaml` and list only what differs;
+# sections are deep-merged, except model.args which is replaced as a whole.
+
+data:
+  clips_dir: ../Data/recordings/clips        # collector output: clips/<label>/<clip_id>.wav
+  csv_path: ../Data/recordings/labels.csv
+  classes: null                              # null = all 13 labels; or a subset, e.g.
+                                             # [kone, punane, sisse, taust, tundmatu, valja]
+                                             # -> 6-output model, other labels' clips are ignored
+  sample_rate: 16000
+  clip_duration_sec: 1.0                     # shorter clips are zero-padded, longer ones center-cropped
+  val_split: 0.15
+  test_split: 0.10
+  seed: 42
+  num_workers: 4
+
+features:
+  type: melspec              # melspec | mfcc
+  n_mels: 40
+  n_fft: 400                 # 25 ms at 16 kHz
+  hop_length: 160            # 10 ms at 16 kHz -> 101 frames per 1 s clip
+  win_length: 400
+  n_mfcc: 13                 # only used when type == mfcc
+  log_eps: 1.0e-6            # log(mel + eps) for melspec
+  normalize: true            # per-feature standardization (mean/std over the training set)
+  norm_eps: 1.0e-5           # lower bound for std
+
+augment:
+  enabled: true
+  time_shift_ms: 100         # random roll within +-100 ms
+  noise_mix_prob: 0.3        # probability of mixing a `taust` clip in
+  noise_snr_db: [5, 20]      # random SNR range
+  volume_jitter: 0.2         # random gain +-20 %
+  specaugment:
+    enabled: true
+    time_mask_param: 20
+    freq_mask_param: 10
+    n_time_masks: 1
+    n_freq_masks: 1
+
+# Transfer learning (opt-in, see configs/transfer_ds_cnn*.yaml and README):
+#   model.name: ds_cnn with args.pretrained_path set to a .pt file (instructions in pretrained/README.md).
+#   freeze_backbone: true  -> only the classifier is retrained (~30 samples/class, fast)
+#   freeze_backbone: false -> full fine-tune (~50 samples/class, usually slightly better)
+# This default config trains from scratch.
+model:
+  name: baseline_cnn         # registry key - see models/registry.py (baseline_cnn | ds_cnn)
+  args:                      # passed to the model constructor as **kwargs; relative *_path values
+                             # are resolved against trainer/. num_classes is added automatically
+                             # (= number of data.classes), don't set it here.
+    dropout: 0.3
+
+training:
+  batch_size: 32
+  epochs: 40
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  optimizer: adamw           # adamw | adam | sgd
+  momentum: 0.9              # sgd only
+  scheduler: cosine          # cosine | step | none
+  step_size: 10              # step scheduler: epochs between LR drops
+  step_gamma: 0.5            # step scheduler: LR multiplier per drop
+  warmup_epochs: 2
+  grad_clip: 1.0             # max grad norm; 0 disables
+  early_stopping_patience: 10
+  class_weighting: true      # inverse-frequency weighting for imbalanced classes
+  mixed_precision: true      # torch.amp on CUDA (ignored on CPU)
+  deterministic: false       # true = reproducible cuDNN kernels (slower)
+
+logging:
+  run_name: baseline_v1
+  save_dir: runs
+  log_every_batches: 10      # batch-level loss lines in training_log.txt
+  tensorboard: false         # optional, requires `pip install tensorboard`
+  save_best_only: true       # false = also keep epoch_NNN.pt for every epoch

@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Playback · Voice Collector{% endblock %}
+
+{% block content %}
+  <div id="error" class="hidden rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"></div>
+
+  <!-- Summary + filter -->
+  <section class="rounded-xl bg-white shadow-sm border border-slate-200 p-5 space-y-4">
+    <div class="flex flex-wrap items-end justify-between gap-4">
+      <div>
+        <h1 class="font-semibold text-lg">Clips</h1>
+        <p class="text-sm text-slate-500">
+          <span id="total">0</span> clips in <span id="rec-total">0</span> recordings
+        </p>
+      </div>
+      <label class="flex flex-col gap-1 text-sm">
+        <span class="text-slate-500 font-medium">Filter by label</span>
+        <select id="filter"
+                class="h-10 min-w-[12rem] rounded-lg border border-slate-300 bg-white px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+          <option value="">All labels</option>
+        </select>
+      </label>
+    </div>
+    <div id="counts" class="flex flex-wrap gap-2 text-sm"></div>
+  </section>
+
+  <!-- Player -->
+  <section class="rounded-xl bg-white shadow-sm border border-slate-200 px-5 py-3 flex items-center gap-4">
+    <span class="text-sm text-slate-500 whitespace-nowrap">Now playing:</span>
+    <span id="now-playing" class="font-mono text-sm truncate grow">—</span>
+    <audio id="player" controls class="h-9"></audio>
+  </section>
+
+  <!-- Recordings (parent rows) with their clips (child rows) -->
+  <section class="rounded-xl bg-white shadow-sm border border-slate-200 overflow-hidden">
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+          <tr>
+            <th class="px-4 py-3 font-medium">clip_id</th>
+            <th class="px-4 py-3 font-medium">label</th>
+            <th class="px-4 py-3 font-medium">recording_name</th>
+            <th class="px-4 py-3 font-medium text-right">start_sec</th>
+            <th class="px-4 py-3 font-medium text-right">duration</th>
+            <th class="px-4 py-3 font-medium">source</th>
+            <th class="px-4 py-3 font-medium">created_at</th>
+            <th class="px-4 py-3"></th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <p id="empty" class="hidden px-4 py-10 text-center text-sm text-slate-500">No clips yet. Record something on the Recorder page.</p>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  <script src="{{ url_for('static', filename='playback.js') }}"></script>
+{% endblock %}
