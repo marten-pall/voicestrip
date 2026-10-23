@@ -14,13 +14,12 @@ LABELS: list[str] = sorted([
     "sisse",
     "taust",
     "tumedam",
-    "tundmatu",
     "valge",
     "valja",
     "vilkuv",
 ])
 
-assert len(LABELS) == len(set(LABELS)) == 13, "LABELS must contain 13 unique keys"
+assert len(LABELS) == len(set(LABELS)) == 12, "LABELS must contain 12 unique keys"
 
 
 def resolve_classes(selected: list[str] | None) -> list[str]:

@@ -35,6 +35,7 @@
       colors: {{ label_colors | tojson }},
       defaultLabel: {{ default_label | tojson }},
       reviewId: {{ (review_id or none) | tojson }},
+      piMicAvailable: {{ pi_mic_available | tojson }},
     };
   </script>
   <script src="{{ url_for('static', filename='ui.js') }}"></script>

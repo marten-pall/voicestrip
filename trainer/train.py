@@ -1,7 +1,7 @@
 """Train a keyword-spotting model.
 
     python train.py --config config.yaml
-    python train.py --config config.yaml -o training.epochs=2 -o model.name=ds_cnn
+    python train.py --config config.yaml -o training.epochs=2 -o features.type=mfcc
 """
 
 from __future__ import annotations
@@ -16,10 +16,11 @@ import torch
 from torch import nn
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from data import VoiceDataset, build_spec_augment, build_waveform_augment, load_items, save_split_ids, stratified_split
+from data import (VoiceDataset, build_spec_augment, build_waveform_augment, leakage_report, load_items, save_split_ids,
+                  stratified_split)
 from engine import (build_optimizer, build_scheduler, class_weights, evaluate, make_loader, param_summary,
                     save_checkpoint, train_one_epoch)
-from features import feature_signature, get_extractor
+from features import get_extractor
 from labels import resolve_classes
 from models import available_models, get_model
 from utils.config import Config, load_config, save_config
@@ -39,31 +40,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def check_pretrained(cfg: Config) -> str | None:
-    """Fail fast (before a run dir is created) if transfer learning is configured but the
-    pretrained file is missing or was trained on different features. Returns a warning, if any."""
-    path = cfg.model.args.get("pretrained_path")
-    if not path:
-        return None
-    path = Path(path)
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"Pretrained checkpoint not found: {path}\n"
-            f"See {TRAINER_DIR / 'pretrained' / 'README.md'} "
-            "(or run: python scripts/pretrain_on_speech_commands.py)")
-    meta = torch.load(path, map_location="cpu", weights_only=True)
-    expected = meta.get("feature_signature") if isinstance(meta, dict) else None
-    current = feature_signature(cfg.features, cfg.data.sample_rate, cfg.data.clip_duration_sec)
-    if expected is None:
-        return f"{path.name} has no feature_signature - cannot verify it was trained on the same features"
-    diff = {k: (expected.get(k), current.get(k)) for k in expected.keys() | current.keys()
-            if expected.get(k) != current.get(k)}
-    if diff:
-        raise ValueError(f"Features differ from the pretrained model's ({{key: (pretrained, config)}}): {diff}\n"
-                         "Transfer learning needs identical features - fix the features/data sections.")
-    return None
-
-
 def make_run_dir(cfg: Config) -> Path:
     run_dir = cfg.logging.save_dir / f"{cfg.logging.run_name}_{datetime.now():%Y%m%d_%H%M%S}"
     run_dir.mkdir(parents=True, exist_ok=False)
@@ -79,7 +55,6 @@ def main() -> None:
         raise ValueError(f"model.args.num_classes={configured} but data.classes has {len(classes)} classes "
                          "- remove num_classes from the config, it is derived automatically")
     cfg.model.args["num_classes"] = len(classes)
-    pretrained_warning = check_pretrained(cfg)
     run_dir = make_run_dir(cfg)
     log = setup_logging(run_dir / "training_log.txt")
     save_config(cfg, run_dir / "config.yaml")
@@ -90,8 +65,6 @@ def main() -> None:
     log.info("Run dir: %s", run_dir)
     log.info("Device: %s%s | mixed precision: %s", device,
              f" ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else "", use_amp)
-    if pretrained_warning:
-        log.warning(pretrained_warning)
 
     # ---- data
     log.info("Classes (%d): %s", len(classes), ", ".join(classes))
@@ -107,12 +80,19 @@ def main() -> None:
     if empty:
         log.warning("Classes with no clips at all (the model never learns them): %s "
                     "- record data or leave them out of data.classes", ", ".join(empty))
-    splits = stratified_split(items, cfg.data.val_split, cfg.data.test_split, cfg.data.seed)
+    splits = stratified_split(items, cfg.data.val_split, cfg.data.test_split, cfg.data.seed,
+                              cfg.data.split_by, cfg.data.clip_duration_sec)
     split_ids = save_split_ids(splits, run_dir / "splits.json")
     if not splits["val"]:
         raise SystemExit("Validation split is empty - every class needs at least 3 clips for train/val/test")
     log.info("Clips: %d total -> train %d / val %d / test %d",
              len(items), len(splits["train"]), len(splits["val"]), len(splits["test"]))
+    for name, r in leakage_report(splits, cfg.data.clip_duration_sec).items():
+        log.info("Leak check %-4s: %d/%d clips overlap a train clip's audio, %d/%d come from a recording "
+                 "that is also in train", name, r["overlap_train"], r["clips"], r["recording_in_train"], r["clips"])
+    for name in ("val", "test"):
+        per_class = Counter(it.label for it in splits[name])
+        log.info("%-5s clips per class: %s", name.capitalize(), ", ".join(f"{c}={per_class.get(c, 0)}" for c in classes))
 
     sr, num_samples = cfg.data.sample_rate, cfg.data.num_samples
     if NOISE_LABEL in classes:  # train split only, so val/test background clips never leak in

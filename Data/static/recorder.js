@@ -13,7 +13,9 @@
   const RECENT_COUNT = 10;
   const WORKLET_URL = '/static/worklet.js';
 
-  const { labels, colors, defaultLabel, reviewId } = window.APP;
+  const { labels, colors, defaultLabel, reviewId, piMicAvailable } = window.APP;
+  const SOURCE_KEY = 'voicecollector.source';
+  const PI_POLL_MS = 200;
   const { fmt, toast, confirmDialog, apiJson } = window.UI;
   const $ = (id) => document.getElementById(id);
 
@@ -30,11 +32,16 @@
     addBoxBtn: $('add-box-btn'), playAllBtn: $('play-all-btn'),
     discardBtn: $('discard-btn'), deleteAllBtn: $('delete-all-btn'),
     newRecordingBtn: $('new-recording-btn'), acceptBtn: $('accept-btn'),
+    sourceBox: $('source-box'), sourceBrowserLabel: $('source-browser-label'), piTestLink: $('pi-test-link'),
+    piBadge: $('pi-badge'), piMeter: $('pi-meter'), piMeterBar: $('pi-meter-bar'),
   };
 
   const state = {
     mode: 'idle', // idle | recording | processing | editing | saving
     reviewMode: !!reviewId,
+    source: 'browser',      // 'browser' | 'pi_i2s'
+    piPollId: null,
+    piPolling: false,
     capture: null,          // { ctx, stream, source, node }
     chunks: [],
     totalSamples: 0,
@@ -336,20 +343,170 @@
 
     try {
       const meta = await apiJson(`/api/recording/${encodeURIComponent(recordingId)}?peaks=0`);
-      const res = await fetch(`/recordings/${meta.original_path.split('/').map(encodeURIComponent).join('/')}`);
-      if (!res.ok) throw new Error(`Could not load ${meta.original_path} (HTTP ${res.status})`);
-      state.samples = parseWav(await res.arrayBuffer());
-      state.duration = state.samples.length / TARGET_SR;
       els.name.value = meta.recording_name;
       if (meta.default_label in labels) els.defaultLabel.value = meta.default_label;
-
-      state.view.layout(state.duration);
-      enterEditor(meta, computePeaks(state.samples, state.view.peakCount));
+      await openInEditor(meta);
     } catch (err) {
       els.editor.classList.add('hidden');
       state.mode = 'idle';
       showError('Could not load the recording.', String(err.message || err));
     }
+  }
+
+  // Load a recording that already exists on the server (review mode, finished Pi recording).
+  async function openInEditor(meta) {
+    showEditorShell();
+    const res = await fetch(`/recordings/${meta.original_path.split('/').map(encodeURIComponent).join('/')}`);
+    if (!res.ok) throw new Error(`Could not load ${meta.original_path} (HTTP ${res.status})`);
+    state.samples = parseWav(await res.arrayBuffer());
+    state.audioBuffer = null;
+    state.duration = state.samples.length / TARGET_SR;
+    state.view.layout(state.duration);
+    enterEditor(meta, computePeaks(state.samples, state.view.peakCount));
+  }
+
+  // ------------------------------------------------------- Pi I2S source
+  // Audio is captured on the server (Raspberry Pi); the browser only starts/stops
+  // it, shows the level, and then loads the finished WAV into the same editor.
+
+  function stopPiPolling() {
+    clearInterval(state.piPollId);
+    state.piPollId = null;
+    els.piMeter.classList.add('hidden');
+  }
+
+  function enterPiRecording(recordingId, soFar = 0) {
+    state.recordingId = recordingId;
+    state.mode = 'recording';
+    els.recordBtn.textContent = '■ STOP';
+    els.recordBtn.classList.add('ring-4', 'ring-red-200');
+    els.recordBtn.disabled = false;
+    els.name.disabled = true;
+    els.defaultLabel.disabled = true;
+    els.recent.disabled = true;
+    setSourceLocked(true);
+    els.timer.textContent = fmt.timer(soFar);
+    els.piMeterBar.style.width = '0%';
+    els.piMeter.classList.remove('hidden');
+    setStatus(`Salvestan Pi I2S mikrofonist (${recordingId})…`);
+    clearInterval(state.piPollId);
+    state.piPollId = setInterval(piPoll, PI_POLL_MS);
+  }
+
+  async function piStart() {
+    hideError();
+    try {
+      const data = await apiJson('/api/pi/start-recording', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: els.name.value.trim(), default_label: els.defaultLabel.value }),
+      });
+      enterPiRecording(data.recording_id);
+    } catch (err) {
+      showError('Pi mikrofoni salvestus ei alanud.', String(err.message || err));
+    }
+  }
+
+  async function piPoll() {
+    if (state.piPolling) return;  // previous request still in flight
+    state.piPolling = true;
+    try {
+      const s = await apiJson('/api/pi/recording-status');
+      if (state.mode !== 'recording') return;
+      if (!s.active || s.recording_id !== state.recordingId) {
+        stopPiPolling();
+        showError('Pi salvestus pole enam aktiivne.', 'Serveris ei käi seda salvestust (rakendus taaskäivitati?).');
+        resetRecorder();
+        return;
+      }
+      els.timer.textContent = fmt.timer(s.duration_so_far);
+      els.longWarning.classList.toggle('hidden', s.duration_so_far <= WARN_SEC);
+      els.piMeterBar.style.width = `${Math.min(1, s.peak_amplitude) * 100}%`;
+      els.piMeterBar.classList.toggle('bg-red-500', s.peak_amplitude > 0.9);
+      els.piMeterBar.classList.toggle('bg-emerald-500', s.peak_amplitude <= 0.9);
+      if (s.failed) {
+        showError('Pi mikrofoni salvestus katkes.', `${s.error} Salvestan seni salvestatud osa.`);
+        await piStop();
+      }
+    } catch (err) {
+      console.warn('Pi status poll failed (will retry)', err);  // transient network error
+    } finally {
+      state.piPolling = false;
+    }
+  }
+
+  async function piStop() {
+    stopPiPolling();
+    state.mode = 'processing';
+    els.recordBtn.disabled = true;
+    els.recordBtn.classList.remove('ring-4', 'ring-red-200');
+    setStatus('Processing…');
+    try {
+      const data = await apiJson('/api/pi/stop-recording', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recording_id: state.recordingId }),
+      });
+      if (data.warning) {
+        showError('Salvestus katkes enneaegselt.', `${data.warning}. Salvestatud osa (${data.duration_sec.toFixed(1)} s) on alles.`);
+      }
+      await openInEditor({ ...data, clips: [] });
+      loadRecent();
+    } catch (err) {
+      showError('Pi salvestuse lõpetamine ebaõnnestus.', String(err.message || err));
+      resetRecorder();
+    }
+  }
+
+  // A Pi recording keeps running on the server if this page is reloaded: pick it up again.
+  async function resumePiRecording() {
+    try {
+      const s = await apiJson('/api/pi/recording-status');
+      if (s.active && state.mode === 'idle') {
+        setSource('pi_i2s', false);
+        enterPiRecording(s.recording_id, s.duration_so_far);
+      }
+    } catch (err) {
+      console.warn('Could not check Pi recording status', err);
+    }
+  }
+
+  // ------------------------------------------------------- source choice
+
+  // getUserMedia only exists on HTTPS or localhost, so opened as http://<pi-ip>
+  // the browser mic is hidden and the Pi mic is the only source.
+  function availableSources() {
+    const list = [];
+    if (window.isSecureContext) list.push('browser');
+    if (piMicAvailable) list.push('pi_i2s');
+    return list;
+  }
+
+  function preferredSource() {
+    const available = availableSources();
+    let saved = null;
+    try { saved = localStorage.getItem(SOURCE_KEY); } catch (_) { /* storage blocked */ }
+    if (available.includes(saved)) return saved;
+    return available.includes('pi_i2s') ? 'pi_i2s' : 'browser';
+  }
+
+  function setSource(source, persist = true) {
+    state.source = source;
+    if (persist) {
+      try { localStorage.setItem(SOURCE_KEY, source); } catch (_) { /* storage blocked */ }
+    }
+    document.querySelectorAll('input[name="source"]').forEach((r) => { r.checked = r.value === source; });
+    const pi = source === 'pi_i2s';
+    els.piBadge.classList.toggle('hidden', !pi);
+    if (els.piTestLink) els.piTestLink.classList.toggle('hidden', !pi);
+    hideError();
+    const unsupported = pi ? null : supportCheck();  // browser capabilities matter only for the browser mic
+    if (unsupported) showError('Browser not supported.', unsupported);
+    if (state.mode === 'idle') els.recordBtn.disabled = !!unsupported;
+  }
+
+  function setSourceLocked(locked) {
+    document.querySelectorAll('input[name="source"]').forEach((r) => { r.disabled = locked; });
   }
 
   // --------------------------------------------------------------- editor
@@ -727,14 +884,22 @@
     els.recent.value = '';
     els.timer.textContent = '00:00';
     els.longWarning.classList.add('hidden');
+    stopPiPolling();
+    setSourceLocked(false);
     setStatus('Press RECORD or the space bar to start.');
     updateControls();
   }
 
-  function toggleRecord() {
+  async function toggleRecord() {
     if (state.reviewMode) return;
-    if (state.mode === 'idle') startRecording();
-    else if (state.mode === 'recording') stopRecording();
+    const pi = state.source === 'pi_i2s';
+    if (state.mode === 'idle') {
+      setSourceLocked(true);
+      await (pi ? piStart() : startRecording());
+      if (state.mode === 'idle') setSourceLocked(false);  // start failed
+    } else if (state.mode === 'recording') {
+      await (pi ? piStop() : stopRecording());
+    }
   }
 
   // ------------------------------------------------------- recent picker
@@ -824,11 +989,14 @@
       loadExisting(reviewId);
       return;
     }
-    const unsupported = supportCheck();
-    if (unsupported) {
-      showError('Browser not supported.', unsupported);
-      els.recordBtn.disabled = true;
+    if (els.sourceBox) {
+      if (!availableSources().includes('browser')) els.sourceBrowserLabel.classList.add('hidden');
+      document.querySelectorAll('input[name="source"]').forEach((r) => {
+        r.addEventListener('change', () => { setSource(r.value); r.blur(); });
+      });
     }
+    setSource(availableSources().length ? preferredSource() : 'browser', false);
+    if (piMicAvailable) resumePiRecording();
   }
 
   init();

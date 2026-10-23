@@ -172,22 +172,11 @@ def param_summary(model: nn.Module) -> str:
 
 # ------------------------------------------------------------------ checkpoints
 
-def _inference_args(model_args: dict[str, Any]) -> dict[str, Any]:
-    """Model kwargs for rebuilding from a checkpoint: the trained weights replace any
-    pretrained init, so the pretrained file is not needed (or loaded) again."""
-    args = dict(model_args)
-    if "pretrained_path" in args:
-        args["pretrained_path"] = None
-    if "freeze_backbone" in args:
-        args["freeze_backbone"] = False
-    return args
-
-
 def save_checkpoint(path: Path, model: nn.Module, extractor: FeatureExtractor, cfg: Config, classes: list[str],
                     epoch: int, val_acc: float, split_ids: dict[str, list[str]]) -> None:
     torch.save({
         "model_name": cfg.model.name,
-        "model_args": _inference_args(cfg.model.args),
+        "model_args": cfg.model.args,
         "model_state": model.state_dict(),
         "extractor_state": extractor.state_dict(),
         "config": cfg.raw,
@@ -205,12 +194,13 @@ def load_checkpoint(path: Path, device: torch.device, base_dir: Path,
     (e.g. to point data paths elsewhere); features/model sections must stay compatible."""
     ckpt = torch.load(path, map_location=device, weights_only=False)
     raw = copy.deepcopy(raw_config or ckpt["config"])
-    # Checkpoints from before data.classes existed: all 13 labels, stored under "labels".
+    # Checkpoints from before data.classes existed: all labels of that time, stored under "labels".
     ckpt.setdefault("classes", ckpt.get("labels", LABELS))
+    raw["data"].setdefault("split_by", "clip")  # checkpoints from before split_by: per-clip splits
     raw["data"]["classes"] = ckpt["classes"]  # the trained head defines the classes, not a swapped config
     cfg = config_from_dict(raw, base_dir)
 
-    model = get_model(ckpt["model_name"], **_inference_args(ckpt["model_args"])).to(device)
+    model = get_model(ckpt["model_name"], **ckpt["model_args"]).to(device)
     model.load_state_dict(ckpt["model_state"])
     extractor = get_extractor(cfg.features, cfg.data.sample_rate).to(device)
     extractor.load_state_dict(ckpt["extractor_state"])

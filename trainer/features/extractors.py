@@ -98,20 +98,6 @@ _EXTRACTORS: dict[str, type[FeatureExtractor]] = {
 }
 
 
-def feature_signature(cfg: FeaturesConfig, sample_rate: int, clip_duration_sec: float) -> dict:
-    """Everything that changes what the network sees. Pretrained weights are only
-    meaningful when the fine-tuning run produces identical features."""
-    sig = {
-        "type": cfg.type, "sample_rate": sample_rate, "clip_duration_sec": clip_duration_sec,
-        "n_mels": cfg.n_mels, "n_fft": cfg.n_fft, "hop_length": cfg.hop_length, "win_length": cfg.win_length,
-    }
-    if cfg.type == "melspec":
-        sig["log_eps"] = cfg.log_eps
-    if cfg.type == "mfcc":
-        sig["n_mfcc"] = cfg.n_mfcc
-    return sig
-
-
 def get_extractor(cfg: FeaturesConfig, sample_rate: int) -> FeatureExtractor:
     if cfg.type not in _EXTRACTORS:
         raise KeyError(f"Unknown features.type '{cfg.type}'. Available: {list(_EXTRACTORS)}")

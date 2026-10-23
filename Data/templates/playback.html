@@ -13,6 +13,14 @@
           <span id="total">0</span> clips in <span id="rec-total">0</span> recordings
         </p>
       </div>
+      <div class="flex flex-wrap items-end gap-3">
+      <label class="flex flex-col gap-1 text-sm">
+        <span class="text-slate-500 font-medium">Filter by source</span>
+        <select id="source-filter"
+                class="h-10 min-w-[10rem] rounded-lg border border-slate-300 bg-white px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+          <option value="">All sources</option>
+        </select>
+      </label>
       <label class="flex flex-col gap-1 text-sm">
         <span class="text-slate-500 font-medium">Filter by label</span>
         <select id="filter"
@@ -20,6 +28,7 @@
           <option value="">All labels</option>
         </select>
       </label>
+      </div>
     </div>
     <div id="counts" class="flex flex-wrap gap-2 text-sm"></div>
   </section>

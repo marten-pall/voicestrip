@@ -26,6 +26,7 @@ class ClipItem:
     label: str | None        # None for unlabelled WAVs (eval on an arbitrary folder)
     recording_id: str
     source: str
+    start_sec: float = 0.0   # position in the original recording (used to detect overlapping clips)
 
 
 def load_items(csv_path: Path, clips_dir: Path, classes: list[str] | None = None) -> list[ClipItem]:
@@ -53,7 +54,8 @@ def load_items(csv_path: Path, clips_dir: Path, classes: list[str] | None = None
         if not path.is_file():
             missing.append(row["clip_id"])
             continue
-        items.append(ClipItem(row["clip_id"], path, label, row["recording_id"], row.get("source", "")))
+        items.append(ClipItem(row["clip_id"], path, label, row["recording_id"], row.get("source", ""),
+                              float(row.get("start_sec") or 0.0)))
 
     if unknown_labels:
         log.warning("Skipped %d rows with labels not in LABELS: %s", sum(unknown_labels.values()), dict(unknown_labels))

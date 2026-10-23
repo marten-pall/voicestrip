@@ -1,10 +1,14 @@
 """Voice data collection tool for keyword-spotting training data.
 
-Single-user localhost Flask app. Records 16 kHz mono PCM in the browser,
+Single-user Flask app. Records 16 kHz mono PCM from one of these sources:
+  - "browser": Web Audio API in the user's browser (needs HTTPS or localhost)
+  - "pi_i2s":  INMP441 I2S mic read on the server via sounddevice (Raspberry Pi only, see pi_mic.py)
+  - "esp32":   reserved for future uploads (POST /api/upload-recording with source=esp32)
 stores the full recording as WAV and slices labelled 1.0 s clips from it.
-Storage is plain files + CSV (no database, no third-party audio libraries).
+Storage is plain files + CSV (no database).
 """
 
+import argparse
 import csv
 import re
 import sys
@@ -15,7 +19,9 @@ from array import array
 from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, abort, jsonify, render_template, request, send_from_directory
+from flask import Flask, Response, abort, jsonify, render_template, request, send_from_directory
+
+import pi_mic
 
 # --------------------------------------------------------------------------- #
 # Configuration
@@ -35,7 +41,6 @@ LABELS = {
     "tumedam": "tumedam",
     "taust": "taust",
     "kone": "kõne",
-    "tundmatu": "tundmatu",
 }
 
 # Muted, distinct colour per label - shared by every page via the template context
@@ -52,7 +57,6 @@ LABEL_COLORS = {
     "tumedam": "#4a4e69",
     "taust": "#7a6f62",
     "kone": "#7b4b94",
-    "tundmatu": "#c06c9a",
 }
 
 DEFAULT_LABEL = "punane"
@@ -62,6 +66,8 @@ CHANNELS = 1
 CLIP_SEC = 1.0
 SNAP_SEC = 0.05
 DEFAULT_PEAKS = 2000
+SOURCES = ("browser", "pi_i2s", "esp32")
+PI_TEST_SECONDS = 3.0
 
 BASE_DIR = Path(__file__).resolve().parent
 REC_DIR = BASE_DIR / "recordings"
@@ -86,6 +92,7 @@ app = Flask(__name__)
 app.json.sort_keys = False
 app.jinja_env.policies["json.dumps_kwargs"] = {"sort_keys": False}
 _lock = threading.Lock()  # serialises CSV writes and recording-id allocation
+mic = pi_mic.PiMic(pi_mic.detect_pi_mic())  # .available can turn False at runtime (see self_test)
 
 
 # --------------------------------------------------------------------------- #
@@ -145,10 +152,14 @@ def slugify(text: str) -> str:
 def next_recording_id() -> str:
     """YYYYMMDD_NNN with NNN = 1 + highest counter used today."""
     prefix = datetime.now().strftime("%Y%m%d")
+    used = [path.stem for path in ORIGINAL_DIR.glob(f"{prefix}_*.wav")]
+    active = mic.active_recording_id()  # Pi recording in progress: its WAV doesn't exist yet
+    if active:
+        used.append(active)
     highest = 0
-    for path in ORIGINAL_DIR.glob(f"{prefix}_*.wav"):
-        parts = path.stem.split("_")
-        if len(parts) >= 2 and parts[1].isdigit():
+    for stem in used:
+        parts = stem.split("_")
+        if parts[0] == prefix and len(parts) >= 2 and parts[1].isdigit():
             highest = max(highest, int(parts[1]))
     return f"{prefix}_{highest + 1:03d}"
 
@@ -269,7 +280,8 @@ def snap_and_clamp(start_sec: float, duration_sec: float) -> float:
 
 @app.context_processor
 def inject_labels():
-    return {"labels": LABELS, "label_colors": LABEL_COLORS, "default_label": DEFAULT_LABEL}
+    return {"labels": LABELS, "label_colors": LABEL_COLORS, "default_label": DEFAULT_LABEL,
+            "pi_mic_available": mic.available}
 
 
 @app.get("/")
@@ -280,6 +292,12 @@ def recorder_page():
 @app.get("/playback")
 def playback_page():
     return render_template("playback.html", active="playback")
+
+
+@app.get("/pi-mic-test")
+def pi_mic_test_page():
+    return render_template("pi_mic_test.html", active="recorder", test_seconds=PI_TEST_SECONDS,
+                           devices=pi_mic.input_devices() if not mic.available else [])
 
 
 @app.get("/review/<recording_id>")
@@ -302,6 +320,39 @@ def api_error(message: str, status: int = 400):
     return jsonify({"error": message}), status
 
 
+def parse_peaks(value, default: int = DEFAULT_PEAKS) -> int:
+    try:
+        count = int(value if value is not None else default)
+    except (TypeError, ValueError):
+        count = default
+    return min(max(count, 100), 20000)
+
+
+def store_recording(pcm: bytes, name: str, default_label: str, source: str,
+                    recording_id: str | None = None) -> dict:
+    """Write an original WAV + its recordings.csv row. Shared by every source.
+    `recording_id` is passed when it was reserved earlier (Pi recordings)."""
+    name = name.strip() or datetime.now().strftime("%Y-%m-%d %H:%M")
+    with _lock:
+        ensure_dirs()
+        recording_id = recording_id or next_recording_id()
+        name = unique_recording_name(name, recording_id)
+        path = ORIGINAL_DIR / f"{recording_id}_{slugify(name)}.wav"
+        write_wav(path, pcm)
+        duration = len(pcm) / (SAMPLE_WIDTH * CHANNELS * SAMPLE_RATE)
+        append_csv(RECORDINGS_CSV, RECORDING_FIELDS, [{
+            "recording_id": recording_id,
+            "recording_name": name,
+            "default_label": default_label,
+            "duration_sec": f"{duration:.3f}",
+            "original_path": rel_path(path),
+            "source": source,
+            "created_at": now_iso(),
+        }])
+    return {"recording_id": recording_id, "recording_name": name,
+            "duration_sec": round(duration, 3), "original_path": rel_path(path)}
+
+
 @app.post("/api/upload-recording")
 def upload_recording():
     # Raw Int16 PCM body + query-string fields (browser), or multipart with an
@@ -321,37 +372,83 @@ def upload_recording():
     if default_label not in LABELS:
         return api_error(f"Unknown label: {default_label}")
     source = fields.get("source", "browser")
-    name = (fields.get("name") or "").strip() or datetime.now().strftime("%Y-%m-%d %H:%M")
+    result = store_recording(pcm, fields.get("name") or "", default_label, source)
+    return jsonify({**result, "waveform": compute_peaks(pcm, parse_peaks(fields.get("peaks")))})
+
+
+# --------------------------------------------------------------------------- #
+# Pi I2S microphone (server-side recording)
+# --------------------------------------------------------------------------- #
+
+@app.get("/api/sources")
+def list_sources():
+    return jsonify({"browser": True, "pi_i2s": mic.available, "esp32": False})
+
+
+def pi_error(exc: Exception):
+    """PiMicError = expected (409); anything else = hardware/driver failure, never a crash."""
+    if isinstance(exc, pi_mic.PiMicError):
+        return api_error(str(exc), 409)
+    print(f"Pi mic error: {type(exc).__name__}: {exc}", flush=True)
+    return api_error(f"Mikrofoni viga: {exc}. Kontrolli juhtmeid ja I2S seadistust (/pi-mic-test).", 503)
+
+
+@app.post("/api/pi/start-recording")
+def pi_start_recording():
+    if not mic.available:
+        return api_error("Pi I2S mikrofoni pole sellel seadmel saadaval", 404)
+    data = request.get_json(silent=True) or {}
+    default_label = str(data.get("default_label") or DEFAULT_LABEL)
+    if default_label not in LABELS:
+        return api_error(f"Unknown label: {default_label}")
     try:
-        peak_count = int(fields.get("peaks", DEFAULT_PEAKS))
-    except ValueError:
-        peak_count = DEFAULT_PEAKS
-    peak_count = min(max(peak_count, 100), 20000)
+        with _lock:  # reserve the id while the stream opens
+            recording_id = next_recording_id()
+            started_at = mic.start(recording_id, str(data.get("name") or ""), default_label)
+    except Exception as exc:  # noqa: BLE001
+        return pi_error(exc)
+    print(f"Started Pi recording {recording_id}", flush=True)
+    return jsonify({"recording_id": recording_id, "started_at": started_at})
 
-    with _lock:
-        ensure_dirs()
-        recording_id = next_recording_id()
-        name = unique_recording_name(name, recording_id)
-        path = ORIGINAL_DIR / f"{recording_id}_{slugify(name)}.wav"
-        write_wav(path, pcm)
-        duration = len(pcm) / (SAMPLE_WIDTH * CHANNELS * SAMPLE_RATE)
-        append_csv(RECORDINGS_CSV, RECORDING_FIELDS, [{
-            "recording_id": recording_id,
-            "recording_name": name,
-            "default_label": default_label,
-            "duration_sec": f"{duration:.3f}",
-            "original_path": rel_path(path),
-            "source": source,
-            "created_at": now_iso(),
-        }])
 
-    return jsonify({
-        "recording_id": recording_id,
-        "recording_name": name,
-        "duration_sec": round(duration, 3),
-        "original_path": rel_path(path),
-        "waveform": compute_peaks(pcm, peak_count),
-    })
+@app.get("/api/pi/recording-status")
+def pi_recording_status():
+    return jsonify(mic.status())
+
+
+@app.post("/api/pi/stop-recording")
+def pi_stop_recording():
+    data = request.get_json(silent=True) or {}
+    recording_id = str(data.get("recording_id", ""))
+    try:
+        audio, meta = mic.stop(recording_id)
+    except Exception as exc:  # noqa: BLE001
+        return pi_error(exc)
+    pcm = pi_mic.to_pcm16(audio)
+    result = store_recording(pcm, meta["name"], meta["default_label"], "pi_i2s", recording_id=recording_id)
+    print(f"Stopped Pi recording {recording_id} ({result['duration_sec']:.1f} s)"
+          + (f" - {meta['warning']}" if meta["warning"] else ""), flush=True)
+    return jsonify({**result, "warning": meta["warning"],
+                    "waveform": compute_peaks(pcm, parse_peaks(data.get("peaks")))})
+
+
+@app.get("/api/pi/peak")
+def pi_peak():
+    try:
+        return jsonify({"peak": round(mic.current_peak(), 4), "recording": mic.active_recording_id() is not None})
+    except Exception as exc:  # noqa: BLE001
+        return pi_error(exc)
+
+
+@app.post("/api/pi/test-record")
+def pi_test_record():
+    """Records PI_TEST_SECONDS and returns the WAV directly (nothing is saved)."""
+    try:
+        audio = mic.test_record(PI_TEST_SECONDS)
+    except Exception as exc:  # noqa: BLE001
+        return pi_error(exc)
+    peak = float(abs(audio).max()) if len(audio) else 0.0
+    return Response(pi_mic.wav_bytes(audio), mimetype="audio/wav", headers={"X-Peak": f"{peak:.4f}"})
 
 
 @app.post("/api/save-clips")
@@ -496,6 +593,7 @@ def delete_recording(recording_id):
 @app.get("/api/clips")
 def list_clips():
     label = request.args.get("label") or None
+    source = request.args.get("source") or None
     if label is not None and label not in LABELS:
         return api_error(f"Unknown label: {label}")
 
@@ -506,10 +604,13 @@ def list_clips():
 
     clips = [
         {**r, "start_sec": float(r["start_sec"] or 0), "duration_sec": CLIP_SEC}
-        for r in all_clips if label is None or r["label"] == label
+        for r in all_clips
+        if (label is None or r["label"] == label) and (source is None or r.get("source") == source)
     ]
     clips.sort(key=lambda r: (r["created_at"], r["clip_id"]), reverse=True)
-    return jsonify({"clips": clips, "counts": counts, "total": len(all_clips)})
+    present = {r.get("source") or "" for r in all_clips} - {""}
+    sources = list(SOURCES) + sorted(present - set(SOURCES))  # known ones first, then e.g. "upload"
+    return jsonify({"clips": clips, "counts": counts, "total": len(all_clips), "sources": sources})
 
 
 @app.delete("/api/clip/<clip_id>")
@@ -526,11 +627,35 @@ def delete_clip(clip_id):
 
 # --------------------------------------------------------------------------- #
 
+def lan_address() -> str | None:
+    """This host's LAN IP (no packet is sent - a UDP connect only selects the route)."""
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("192.0.2.1", 9))
+            return sock.getsockname()[0]
+    except OSError:
+        return None
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Voice Collector")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="0.0.0.0 = reachable from other devices on the network (no login - trusted LAN only)")
+    parser.add_argument("--port", type=int, default=5000)
+    args = parser.parse_args()
+
     ensure_dirs()
+    mic.self_test()
     print()
     print("  Voice Collector")
     print(f"  Salvestused: {REC_DIR}")
-    print("  Ava Chrome ja mine: http://localhost:5000")
+    print(f"  Pi I2S mikrofon: {'olemas' if mic.available else 'ei ole (ainult brauseri mikrofon)'}")
+    print(f"  Ava Chrome ja mine: http://localhost:{args.port}")
+    if args.host == "0.0.0.0":
+        ip = lan_address()
+        print(f"  Teistest seadmetest: http://{ip or '<selle-masina-ip>'}:{args.port}"
+              "  (seal on brauseri mikrofon peidetud - see vajab HTTPS/localhost)")
+        print("  NB: rakendusel pole parooli - kasuta ainult usaldusväärses võrgus.")
     print()
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    app.run(host=args.host, port=args.port, debug=False, threaded=True)

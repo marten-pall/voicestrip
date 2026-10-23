@@ -1,3 +1,3 @@
-from .extractors import FeatureExtractor, MelSpectrogramExtractor, MFCCExtractor, feature_signature, get_extractor
+from .extractors import FeatureExtractor, MelSpectrogramExtractor, MFCCExtractor, get_extractor
 
-__all__ = ["FeatureExtractor", "MelSpectrogramExtractor", "MFCCExtractor", "feature_signature", "get_extractor"]
+__all__ = ["FeatureExtractor", "MelSpectrogramExtractor", "MFCCExtractor", "get_extractor"]

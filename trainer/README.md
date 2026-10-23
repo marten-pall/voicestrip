@@ -3,10 +3,11 @@
 ## Mis see on
 
 Häälkäskluste klassifikaator (keyword spotting) RGB LED kontrollerile. Treenitakse kollektori
-(`../Data/`) kogutud 1-sekundilistel WAV-klippidel: 16 kHz, mono, kuni 13 klassi (`data.classes` valib alamhulga).
+(`../Data/`) kogutud 1-sekundilistel WAV-klippidel: 16 kHz, mono, kuni 12 klassi (`data.classes` valib alamhulga).
 
 Torustik: `labels.csv` → stratifitseeritud train/val/test jaotus → augmentatsioon (nihe, helitugevus,
-taustamüra) → log-mel või MFCC tunnused (GPU-l) → SpecAugment → CNN → kontrollpunktid + segadusmaatriks.
+taustamüra) → log-mel või MFCC tunnused (GPU-l) → SpecAugment → sinu CNN (`models/my_model.py`) →
+kontrollpunktid + segadusmaatriks.
 
 Sihtkeskkond: Ubuntu + GTX 1650 (4 GB), SSH + tmux. Töötab ka CPU-l (aeglasemalt).
 
@@ -39,7 +40,7 @@ tmux attach -t train
 
 ```bash
 python train.py --config config.yaml -o training.epochs=2
-python train.py --config config.yaml -o model.name=ds_cnn -o features.type=mfcc
+python train.py --config config.yaml -o features.type=mfcc
 ```
 
 Iga treening loob kausta `runs/<run_name>_<YYYYMMDD_HHMMSS>/`:
@@ -64,87 +65,63 @@ python eval.py --checkpoint runs/<run>/best.pt --wav-dir minu_wavid/
 `--wav-dir`: kui WAV on sildinimelises kaustas (`minu_wavid/punane/x.wav`), arvutatakse täpsus;
 muidu prinditakse ainult ennustused.
 
-## Oma mudeli lisamine
+## Oma mudeli ehitamine
 
-Loo fail `models/my_model.py` — see registreeritakse automaatselt, muid faile muutma ei pea:
+Mudel elab failis `models/my_model.py`. Täida `__init__` ja `forward`:
 
 ```python
-from .registry import register_model
-import torch.nn as nn
-
 @register_model("my_model")
 class MyModel(nn.Module):
-    def __init__(self, num_classes, hidden_dim=128):
+    def __init__(self, num_classes, channels=32, dropout=0.3):
         super().__init__()
-        # ...
-    def forward(self, x):          # x: [B, 1, n_features, n_frames], nt [B, 1, 40, 101]
-        return self.head(x)
+        # sinu kihid siin
+        ...
+
+    def forward(self, x):
+        # x: [B, 1, n_mels, n_frames]
+        # tagasta: [B, num_classes]
+        ...
 ```
 
-Siis `config.yaml`:
+Lisa oma hüperparameetrid `config.yaml` → `model.args` alla:
 
 ```yaml
 model:
   name: my_model
   args:
-    hidden_dim: 256        # num_classes lisatakse automaatselt (= klasside arv)
+    channels: 32
+    dropout: 0.3
 ```
 
-Olemasolevad mudelid: `baseline_cnn` (vaikimisi, ~24k parameetrit) ja `ds_cnn`
-(Depthwise-Separable CNN, Zhang et al. 2017, ~23k parameetrit — sobib hiljem mikrokontrollerile).
+`num_classes` lisatakse automaatselt — see on klasside arv `data.classes`-is (praegu 5). Kui paned selle
+ise `model.args` alla ja see ei klapi, annab treening vea.
 
-## Transfer learning (valikuline)
-
-Kiirem konvergents, vähem andmeid vaja. Kasutab DS-CNN mudelit (ARM ML-KWS arhitektuur),
-eeltreenitud 35 ingliskeelse sõna peal (Google Speech Commands v2). Vaikimisi (`config.yaml`)
-treenitakse nullist — transfer learning lülitub sisse ainult `configs/transfer_*.yaml` kaudu.
-
-### Variant 1: lae alla valmis kaalud
-Vaata `pretrained/README.md`. NB: ARM-i ametlikud kaalud on TensorFlow graafid teistsuguste
-tunnuste jaoks (10 MFCC × 49 kaadrit) ega sobi siia otse — seepärast on soovitatav variant 2.
-
-### Variant 2: treeni ise Speech Commands peal (üks kord, ~2 tundi GTX 1650-l)
+Train:
 ```bash
-python scripts/pretrain_on_speech_commands.py --epochs 30
+python train.py --config config.yaml
 ```
-Laeb alla ~2.3 GB andmestiku (`~/.cache/torchaudio`) ja salvestab `pretrained/ds_cnn_speech_commands.pt`.
-Kasutab täpselt samu tunnuseid kui `configs/transfer_ds_cnn.yaml` — `train.py` kontrollib seda
-ja keeldub alustamast, kui tunnuste seaded erinevad.
 
-### Treeni oma andmetel transfer learning'uga
-```bash
-python train.py --config configs/transfer_ds_cnn.yaml           # fine-tune kõik kihid
-python train.py --config configs/transfer_ds_cnn_frozen.yaml    # ainult classifier head (kiireim)
-python train.py --config configs/scratch.yaml                   # võrdluseks: nullist
-```
-Logi alguses on näha `Total params / Trainable params (frozen: ...)` — külmutatud variandis
-treenitakse ainult viimast kihti (13 klassiga 845 kaalu, 6 klassiga 390). Külmutatud kihtide BatchNorm statistika jääb samuti muutmata.
+Enne kui mudel on valmis, lõpeb treening veaga `NotImplementedError: Build your model in
+trainer/models/my_model.py ...` — see tähendab, et kõik muu on paigas.
 
-Variandid kirjutavad eri kaustadesse (`runs/scratch_baseline_v1_*`, `runs/transfer_ds_cnn_v1_*`,
-`runs/transfer_ds_cnn_frozen_v1_*`); võrdle `metrics.csv` ja logi lõpus olevat testitulemust.
-
-`configs/*.yaml` algavad reaga `base: ../config.yaml` ja sisaldavad ainult erinevusi
-(sektsioonid liidetakse; `model.args` asendatakse tervikuna).
-
-### Soovitus
-- **Alusta `config.yaml` (scratch)** — kui >90% accuracy saavutad, tee valmis
-- **Kui <90% või tahad vähemate andmetega** → `configs/transfer_ds_cnn_frozen.yaml`
-- **Kui ikka vähe** → `configs/transfer_ds_cnn.yaml` (full fine-tune)
+Teiste mudelite lisamiseks: loo uus fail `models/<nimi>.py`, dekoreeri klass
+`@register_model("<nimi>")`, muuda `config.yaml` → `model.name` sellele nimele.
+Kõik `models/` kausta failid imporditakse automaatselt.
 
 ## Ainult osa klassidega treenimine
 
-Kui kõigi 13 klassi jaoks pole veel andmeid, vali `data.classes` abil alamhulk — mudeli väljundkiht
+Kui kõigi 12 klassi jaoks pole veel andmeid, vali `data.classes` abil alamhulk — mudeli väljundkiht
 tehakse täpselt nii suur, teiste siltide klipid jäetakse välja:
 
 ```yaml
 data:
-  classes: [kone, punane, sisse, taust, tundmatu, valja]   # null = kõik 13
+  classes: [kone, punane, sisse, taust, valja]   # null = kõik 12
 ```
 
 või ilma configi muutmata:
 
 ```bash
-python train.py --config configs/transfer_ds_cnn_frozen.yaml -o "data.classes=[kone, punane, sisse, taust, tundmatu, valja]"
+python train.py --config config.yaml -o "data.classes=[kone, punane, sisse, taust, valja]"
 ```
 
 - Klassid sorteeritakse tähestikuliselt; väljundi indeks `i` = `classes[i]`. Nimekiri salvestatakse
@@ -152,11 +129,32 @@ python train.py --config configs/transfer_ds_cnn_frozen.yaml -o "data.classes=[k
 - `taust` klippe kasutatakse müra segamiseks ka siis, kui `taust` pole ise klass.
 - Kui lisad hiljem klassi, treeni uuesti — erineva klasside arvuga kontrollpunkte ei saa omavahel vahetada.
 
+## Train/val/test jaotus ja lekkekontroll
+
+Kollektoris võivad kastid kattuda. Kui kaks kattuvat klippi satuvad üks treeningusse ja teine testi, on
+testitulemus liiga hea (mudel on testiklippi sisuliselt juba näinud). `data.split_by` määrab, mis peab
+jaotamisel koos püsima:
+
+| `split_by` | mis jääb kokku | millal |
+|---|---|---|
+| `clip` | mitte midagi (iga klipp eraldi) | ainult võrdluseks vanade jooksudega — kattuvad kastid lekivad |
+| `overlap` (vaikimisi) | sama salvestise ajaliselt kattuvad klipid | tavaline valik |
+| `recording` | terved salvestised | aus „uue sessiooni“ test; vajab igale klassile ≥ 3 salvestist |
+
+Iga treeningu logi alguses on lekkekontroll, näiteks:
+
+```
+Leak check test: 0/76 clips overlap a train clip's audio, 76/76 come from a recording that is also in train
+```
+
+Esimene arv peab `overlap`/`recording` puhul olema 0. Teine näitab, kui palju testiklippe on samast
+sessioonist (ruum, mikrofon, hääl) kui treeningklipid — mida suurem, seda optimistlikum on testitulemus.
+
 ## Config overview
 
 Kõik võtmed on kohustuslikud — puuduv või valesti kirjutatud võti annab kohe vea (vaikeväärtusi koodis pole).
 
-- **data** — CSV ja klippide asukoht, `classes` (alamhulk või `null`), diskreetimissagedus, klipi pikkus (lühem → nullidega, pikem → keskelt lõigatud),
+- **data** — CSV ja klippide asukoht, `classes` (alamhulk või `null`), `split_by` (vt ülal), diskreetimissagedus, klipi pikkus (lühem → nullidega, pikem → keskelt lõigatud),
   val/test osakaal, seeme, DataLoaderi töötajad. Klassid, kus on alla 3 klipi, lähevad ainult treeningusse.
 - **features** — `melspec` või `mfcc`, FFT/akna/hüppe parameetrid, normaliseerimine
   (keskmine/std arvutatakse treeninghulgalt ja salvestatakse kontrollpunkti).
@@ -178,6 +176,6 @@ Kõik võtmed on kohustuslikud — puuduv või valesti kirjutatud võti annab ko
 
 ## Edaspidi
 
-- ESP32 export: PyTorch → ONNX → TensorFlow Lite (int8 kvantimine) → TFLite Micro.
-  `ds_cnn` on selleks parem lähtepunkt kui `baseline_cnn`.
+- ESP32 export: PyTorch → ONNX → TensorFlow Lite (int8 kvantimine) → TFLite Micro. Hoia mudel väike
+  (kümned tuhanded parameetrid), et see mikrokontrollerisse mahuks.
 - Tunnuste arvutus seadmes peab vastama `features` sektsioonile (sama mel-filterpank, hop, normaliseerimine).

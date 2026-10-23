@@ -46,7 +46,7 @@ Varasemaid salvestusi saab jätkata rippmenüüst **Jätka hiljuti salvestust** 
 Lehel **Playback** (`/playback`) on klipid grupeeritud salvestuste kaupa: `▶ Preview` näitab originaali
 lainekuju koos olemasolevate kastidega, `Jump to review →` avab salvestuse review-režiimis.
 
-## Sildid (13 klassi)
+## Sildid (12 klassi)
 
 | võti (failid, CSV) | UI nimi    | tähendus                                  |
 |--------------------|------------|-------------------------------------------|
@@ -60,9 +60,8 @@ lainekuju koos olemasolevate kastidega, `Jump to review →` avab salvestuse rev
 | `vilkuv`           | vilkuv     | vilkumine                                 |
 | `heledam`          | heledam    | heleduse muutmine                         |
 | `tumedam`          | tumedam    | heleduse muutmine                         |
-| `taust`            | taust      | vaikus, ruumimüra, muusika                |
+| `taust`            | taust      | kõik muu, mis pole käsklus ega kõne: vaikus, ruumimüra, muusika, uksed, köha, koer |
 | `kone`             | kõne       | tavaline rääkimine, mitte-käsklus kõne    |
-| `tundmatu`         | tundmatu   | muud helid (uksed, köha, koer)            |
 
 Sildid on defineeritud `app.py` alguses (`LABELS`, `LABEL_COLORS`); kõik rippmenüüd ja värvid tulevad sealt.
 
@@ -110,6 +109,57 @@ recordings/
 ```
 
 Kõik failid: WAV, 16-bit PCM, mono, 16 000 Hz. Kaust `recordings/` luuakse automaatselt ja on `.gitignore`-is.
+
+## Heliallikad
+
+| `source` (CSV) | Kust heli tuleb | Millal saadaval |
+|---|---|---|
+| `browser` | brauseri mikrofon (Web Audio API) | brauser avab lehe HTTPS-i või `localhost`-i kaudu |
+| `pi_i2s` | Raspberry Pi INMP441 I2S mikrofon, salvestab server | rakendus töötab Pi'l ja mikrofon on leitud |
+| `esp32` | tulevikus ESP32 üleslaadimised | veel mitte |
+
+Kui mõlemad on saadaval, saab salvestuslehel valida ("Allikas"); valik jäetakse brauserisse meelde.
+Brauserid lubavad mikrofoni ainult HTTPS-i või `localhost`-i kaudu — kui avad lehe `http://<pi-ip>:5000`
+kaudu (telefon, sülearvuti), peidetakse brauseri mikrofon ja Pi I2S on ainus allikas.
+Playback-lehel saab klippe allika järgi filtreerida.
+
+## Käivitamine Raspberry Pi'l
+
+Vajadused:
+- Raspberry Pi 3/4/5 Raspberry Pi OS Bookworm või uuem
+- INMP441 I2S mikrofon ühendatud (L/R → GND, siis kasutatakse vasakut kanalit)
+- I2S overlay seadistatud `/boot/firmware/config.txt`-s (nt `dtoverlay=googlevoicehat-soundcard`)
+
+Install:
+```bash
+sudo apt install -y libportaudio2 python3-sounddevice python3-scipy python3-numpy
+cd ~/voicestrip/Data
+python3 -m venv venv --system-site-packages
+source venv/bin/activate
+pip install -r requirements.txt
+python app.py --host 0.0.0.0
+```
+
+(Teine võimalus: `pip install sounddevice scipy numpy` venv-is, mis on loodud `--system-site-packages`-iga.)
+
+Ava telefonis või arvutis brauserist:
+```
+http://<pi-ip>:5000
+```
+
+`--host 0.0.0.0` teeb rakenduse kohtvõrgus nähtavaks (vaikimisi ainult `localhost`). Rakendusel pole
+parooli ja seal saab salvestusi kustutada — kasuta seda ainult usaldusväärses võrgus.
+
+Käivitamisel kirjutab terminal, kas Pi mikrofon leiti (`Pi I2S mikrofon: olemas`). Mikrofoni kontrollimiseks
+ava `/pi-mic-test` (link on salvestuslehel Pi allika kõrval): elav tasemeriba ja 3-sekundiline testsalvestus.
+
+Kui mikrofoni ei leita, kuigi see on ühendatud:
+- vaata seadmete nimekirja `/pi-mic-test` lehel või `arecord -l`;
+- vali seade käsitsi: `PI_MIC_DEVICE=<number või nime osa> python app.py --host 0.0.0.0`;
+- `PI_MIC=1` lülitab tuvastuse sisse ka mujal kui Raspberry Pi'l (nt teine Linuxi plaat), `PI_MIC=0` lülitab välja.
+
+Salvestamine: 48 kHz stereo int32 (INMP441 omaformaat) → vasak kanal → 16 kHz mono 16-bit WAV, sama
+formaat mis brauseri salvestustel. Edasine töö (kastid, Accept, klipid, CSV) on täpselt sama.
 
 ## Edaspidi
 

@@ -11,7 +11,7 @@
   const $ = (id) => document.getElementById(id);
 
   const els = {
-    error: $('error'), filter: $('filter'), counts: $('counts'),
+    error: $('error'), filter: $('filter'), sourceFilter: $('source-filter'), counts: $('counts'),
     total: $('total'), recTotal: $('rec-total'),
     rows: $('rows'), empty: $('empty'), player: $('player'), nowPlaying: $('now-playing'),
   };
@@ -131,19 +131,32 @@
 
   async function load() {
     const label = els.filter.value;
+    const source = els.sourceFilter.value;
+    const params = new URLSearchParams();
+    if (label) params.set('label', label);
+    if (source) params.set('source', source);
+    const filtered = !!(label || source);
     try {
       const [recData, clipData] = await Promise.all([
         apiJson('/api/recordings'),
-        apiJson(label ? `/api/clips?label=${encodeURIComponent(label)}` : '/api/clips'),
+        apiJson(`/api/clips${params.toString() ? `?${params}` : ''}`),
       ]);
+      fillSourceFilter(clipData.sources || []);
       showError('');
       recData.recordings.forEach((r) => durations.set(r.recording_id, r.duration_sec));
-      const groups = groupClips(recData.recordings, clipData.clips, !!label);
+      const groups = groupClips(recData.recordings, clipData.clips, filtered);
       renderCounts(clipData.counts, clipData.total, recData.recordings.length);
-      renderGroups(groups, !!label);
+      renderGroups(groups, filtered);
     } catch (err) {
       showError(`Could not load clips: ${err.message || err}`);
     }
+  }
+
+  function fillSourceFilter(sources) {
+    const current = els.sourceFilter.value;
+    els.sourceFilter.innerHTML = '<option value="">All sources</option>' +
+      sources.map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+    els.sourceFilter.value = sources.includes(current) ? current : '';
   }
 
   // -------------------------------------------------------------- preview
@@ -233,6 +246,7 @@
     els.filter.insertAdjacentHTML('beforeend', Object.entries(labels)
       .map(([key, display]) => `<option value="${key}">${escapeHtml(display)}</option>`).join(''));
     els.filter.addEventListener('change', load);
+    els.sourceFilter.addEventListener('change', load);
     els.rows.addEventListener('click', onRowsClick);
     load();
   }

@@ -1,1 +1,5 @@
 Flask>=3.0
+# Pi I2S microphone (server-side recording). Optional on a PC - the app runs without them.
+sounddevice>=0.4
+scipy>=1.10
+numpy>=1.24

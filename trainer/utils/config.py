@@ -25,6 +25,7 @@ class DataConfig:
     clip_duration_sec: float
     val_split: float
     test_split: float
+    split_by: str
     seed: int
     num_workers: int
 
@@ -163,7 +164,7 @@ def config_from_dict(raw: dict[str, Any], base_dir: Path) -> Config:
     sections = {name: _build(hints[name], raw[name], name, base_dir) for name in fields}
 
     # Model args are free-form; resolve any relative `*_path` string the same way as other paths.
-    args = dict(sections["model"].args)
+    args = dict(sections["model"].args or {})  # `args:` with only comments is null in YAML
     for key, value in args.items():
         if key.endswith("_path") and isinstance(value, str) and not Path(value).is_absolute():
             args[key] = str((base_dir / value).resolve())
