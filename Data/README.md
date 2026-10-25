@@ -161,6 +161,47 @@ Kui mikrofoni ei leita, kuigi see on ühendatud:
 Salvestamine: 48 kHz stereo int32 (INMP441 omaformaat) → vasak kanal → 16 kHz mono 16-bit WAV, sama
 formaat mis brauseri salvestustel. Edasine töö (kastid, Accept, klipid, CSV) on täpselt sama.
 
+## Salvestuste toomine Pi'lt arvutisse
+
+Pi'l ja arvutis töötab sama koguja, kumbki oma `recordings/` kaustaga. Mõlemad annavad
+id-d `next_recording_id()`-ga — "YYYYMMDD_ + 1 + tänane suurim" — aga loevad ainult
+**oma** ketast. Seega tekib samal päeval mõlemal `20261025_001`, kahe täiesti erineva
+salvestuse kohta. Kaustade kokkukopeerimine kirjutaks ühe teisega üle ja jätaks
+`labels.csv`-sse kaks tähendust ühe `clip_id` jaoks.
+
+**1. Kopeeri Pi `recordings/` kaust eraldi kausta** (mitte otse `Data/recordings` peale):
+
+```bash
+# WSL-ist, katkestuse järel jätkab samast kohast
+wsl rsync -avh --partial --progress pi@raspberrypi.local:~/voicestrip/Data/recordings/ ~/incoming/recordings/
+```
+
+Ilma WSL-ita töötab ka `scp -r pi@raspberrypi.local:~/voicestrip/Data/recordings ./incoming`,
+aga see alustab iga kord algusest.
+
+**2. Impordi.** Peata koguja (`app.py`) mõlemas masinas. Kõigepealt kuivalt:
+
+```powershell
+venv\Scripts\python.exe scripts\import_drop.py --from C:\incoming\recordings
+venv\Scripts\python.exe scripts\import_drop.py --from C:\incoming\recordings --apply
+```
+
+Skript tunneb salvestuse ära **heli järgi**, mitte id järgi:
+
+| olukord | mis juhtub |
+|---|---|
+| id on siin vaba | jääb oma id-le |
+| id on võetud, heli sama | juba imporditud, jäetakse vahele |
+| id on võetud, heli erinev | saab järgmise vaba id ja `recording_id`, `clip_id`, `clip_path` ning `original_path` kirjutatakse ümber |
+
+Uus id väldib nii siinseid id-sid kui ka neid, mida sama import endale jätab. Juba
+imporditud salvestust tuntakse ära ka siis, kui ta sai siin uue id — seega **teistkordne
+käivitamine ei tee midagi** ja katkenud kopeerimist võib julgelt korrata.
+
+Teatatakse, aga ei peata: `labels.csv` rida, mille WAV-i ei tulnud kaasa (jäetakse välja,
+`--allow-missing-audio` võtab need ka), ja WAV, mida `labels.csv` ei maini. Olemasolevaid
+faile üle ei kirjutata ja mõlemast CSV-st tehakse enne muutmist `.bak` koopia.
+
 ## Edaspidi
 
 - **ESP32 integratsioon** — CSV-s on juba väli `source` (`esp32`). `POST /api/upload-recording` võtab vastu ka
