@@ -26,7 +26,7 @@ class DataConfig:
     clips_dir: Path = Path("../Data/recordings/clips")   # collector output: clips/<label>/<clip_id>.wav
     csv_path: Path = Path("../Data/recordings/labels.csv")
     # None = all 12 labels; a subset gives a smaller output layer, other labels' clips are ignored
-    classes: list[str] | None = None
+    classes: list[str] | None = field(default_factory=lambda: ["kone", "sisse", "taust", "valja"])
     # a subset instead: field(default_factory=lambda: ["kone", "punane", "sisse", "taust", "valja"])
     sample_rate: int = 16000
     clip_duration_sec: float = 1.0          # shorter clips are zero-padded, longer ones center-cropped
