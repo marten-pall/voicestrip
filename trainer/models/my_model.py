@@ -8,12 +8,12 @@ Input tensor shape (standard):
     x: [B, 1, n_mels, n_frames]
     - B = batch size
     - 1 = single-channel feature map
-    - n_mels = features.n_mels from config.yaml (default 40); n_mfcc (13) if features.type is mfcc
+    - n_mels = features.n_mels in utils/config.py (default 40); n_mfcc (13) if features.type is mfcc
     - n_frames = ~101 for 1s audio at 16kHz with hop_length=160
 
 Output tensor shape:
     logits: [B, num_classes]
-    - num_classes = number of classes in data.classes (config.yaml); train.py
+    - num_classes = number of classes in data.classes (utils/config.py); train.py
       passes it in automatically, you don't put it in model.args
     - Return raw logits (no softmax). Training loop applies CrossEntropyLoss,
       which includes softmax internally.
@@ -23,26 +23,27 @@ import torch
 import torch.nn as nn
 
 from .registry import register_model
-
-TODO_MESSAGE = "Build your model in trainer/models/my_model.py (MyModel.__init__ and MyModel.forward)"
-
+from .configs.cnn_config import CnnConfig as cfg
 
 @register_model("my_model")
 class MyModel(nn.Module):
-    def __init__(self, num_classes: int, **kwargs):
+    def __init__(self, in_channels_1 = cfg.in_channels_1, out_channels_1 = cfg.out_channels_1, kernel_size= cfg.kernel_size, dropout = cfg.dropout, pool_size = cfg.pool_size, num_classes = cfg.num_classes):
         """
-        Build your layers here.
-
-        kwargs come from `model.args` in config.yaml. Add any hyperparameters
-        you want to control from config (e.g., channels, dropout, kernel_size)
-        as explicit keyword arguments.
-
         Example signature:
             def __init__(self, num_classes, channels=32, dropout=0.3):
+
+        .\venv\Scripts\python.exe train.py
         """
         super().__init__()
-        # TODO: define your layers
-        raise NotImplementedError(TODO_MESSAGE)
+        padding = kernel_size // 2
+        self.conv1 = nn.Conv2d(in_channels=in_channels_1, out_channels=out_channels_1, kernel_size=kernel_size, padding=padding)
+        self.BatchNorm1 = nn.BatchNorm2d(num_features=out_channels_1)
+        self.conv2 = nn.Conv2d(in_channels=out_channels_1, out_channels=out_channels_1, kernel_size=kernel_size, padding=padding)
+        self.BatchNorm2 = nn.BatchNorm2d(num_features=out_channels_1)
+        self.Silu = nn.SiLU()
+        self.pool = nn.MaxPool2d(pool_size)
+        self.dropout = nn.Dropout(dropout)
+        self.Output = nn.Linear(out_channels_1, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -52,5 +53,19 @@ class MyModel(nn.Module):
         Returns:
             logits: [B, num_classes]
         """
-        # TODO: implement forward pass
-        raise NotImplementedError(TODO_MESSAGE)
+        x = self.conv1(x)            # [B, 1, 40, 101] -> [B, C, 40, 101]
+        x = self.BatchNorm1(x)
+        x = self.Silu(x)
+        x = self.pool(x)             # -> [B, C, 20, 50]
+
+        x = self.conv2(x)
+        x = self.BatchNorm2(x)
+        x = self.Silu(x)
+
+        # Collapse the time/frequency grid so the classifier sees one value per
+        # channel. nn.Linear works on the LAST dimension, so without this it
+        # would try to multiply the 50 frames by a weight expecting C.
+        x = x.mean(dim=(2, 3))       # -> [B, C]
+        x = self.dropout(x)
+        x = self.Output(x)           # -> [B, num_classes]
+        return x

@@ -8,6 +8,7 @@
   const $ = (id) => document.getElementById(id);
   const els = {
     error: $('error'), value: $('peak-value'), db: $('peak-db'), bar: $('peak-bar'), hint: $('peak-hint'),
+    rtt: $('rtt'), lag: $('lag'),
     testBtn: $('test-btn'), testStatus: $('test-status'), audio: $('test-audio'),
   };
   let polling = false;
@@ -33,9 +34,12 @@
     if (polling || paused || document.hidden) return;
     polling = true;
     try {
+      const t0 = performance.now();
       const res = await fetch('/api/pi/peak');
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      els.rtt.textContent = Math.round(performance.now() - t0);
+      els.lag.textContent = data.buffer_lag_ms ?? '–';
       showError('');
       render(data.peak);
     } catch (err) {

@@ -32,6 +32,7 @@ INT32_FULL_SCALE = 2 ** 31
 DEVICE_PATTERNS = ("googlevoicehat", "snd_rpi", "i2s", "adau7002", "mems")
 MONITOR_IDLE_SEC = 30
 MIN_DURATION_SEC = 0.1
+BLOCK_FRAMES = 960  # 20 ms per callback: small blocks keep the live level meter responsive
 
 
 class PiMicError(RuntimeError):
@@ -114,6 +115,7 @@ class _Capture:
         self.peak_since_read = 0.0
         self.overflows = 0
         self.error: str | None = None
+        self.started = time.monotonic()
         self.lock = threading.Lock()
 
         def callback(indata, frames, time_info, status):  # runs in PortAudio's thread
@@ -131,8 +133,10 @@ class _Capture:
                 self.error = f"{type(exc).__name__}: {exc}"
                 raise sd.CallbackAbort from exc
 
+        # latency="low": PortAudio's default for input is "high", which on some ALSA/I2S
+        # drivers delivers audio in large, late chunks.
         self.stream = sd.InputStream(device=device, samplerate=CAPTURE_RATE, channels=CAPTURE_CHANNELS,
-                                     dtype="int32", callback=callback)
+                                     dtype="int32", callback=callback, blocksize=BLOCK_FRAMES, latency="low")
         self.stream.start()
 
     @property
@@ -142,6 +146,11 @@ class _Capture:
     @property
     def duration(self) -> float:
         return self.frames / CAPTURE_RATE
+
+    @property
+    def lag_ms(self) -> float:
+        """How far the delivered audio trails wall-clock time (driver/PortAudio buffering)."""
+        return max(0.0, (time.monotonic() - self.started - self.duration) * 1000)
 
     def read_peak(self) -> float:
         with self.lock:
@@ -232,6 +241,7 @@ class PiMic:
             "active": True,
             "recording_id": rec["id"],
             "duration_so_far": round(capture.duration, 2),
+            "buffer_lag_ms": round(capture.lag_ms),
             "peak_amplitude": round(capture.read_peak(), 4),
             "failed": failed,
             "error": (capture.error or "Mikrofoni voog katkes (ühendus või I2S seadistus?)") if failed else None,
@@ -276,6 +286,11 @@ class PiMic:
                 threading.Thread(target=self._close_when_idle, daemon=True).start()
             self.monitor_used = time.monotonic()
             return self.monitor.read_peak()
+
+    def current_lag_ms(self) -> float | None:
+        rec, monitor = self.recording, self.monitor
+        capture = rec["capture"] if rec else monitor
+        return round(capture.lag_ms) if capture is not None else None
 
     def _close_when_idle(self) -> None:
         while True:

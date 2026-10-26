@@ -6,6 +6,11 @@ Single-user Flask app. Records 16 kHz mono PCM from one of these sources:
   - "esp32":   reserved for future uploads (POST /api/upload-recording with source=esp32)
 stores the full recording as WAV and slices labelled 1.0 s clips from it.
 Storage is plain files + CSV (no database).
+
+cd ~/voicestrip/Data
+source venv/bin/activate
+python app.py --host 0.0.0.0
+
 """
 
 import argparse
@@ -435,7 +440,8 @@ def pi_stop_recording():
 @app.get("/api/pi/peak")
 def pi_peak():
     try:
-        return jsonify({"peak": round(mic.current_peak(), 4), "recording": mic.active_recording_id() is not None})
+        return jsonify({"peak": round(mic.current_peak(), 4), "recording": mic.active_recording_id() is not None,
+                        "buffer_lag_ms": mic.current_lag_ms()})
     except Exception as exc:  # noqa: BLE001
         return pi_error(exc)
 

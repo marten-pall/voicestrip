@@ -19,7 +19,7 @@ from torch import nn
 
 from data import ClipItem, VoiceDataset, load_items, select_by_ids
 from engine import evaluate, load_checkpoint, make_loader
-from utils.config import read_raw_config
+from utils.config import default_raw
 from utils.logger import setup_logging
 from utils.metrics import confusion_matrix_plot, format_report
 
@@ -32,8 +32,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", choices=["test", "val", "train", "all"], default="test",
                         help="which clips of the CSV to evaluate (ignored with --wav-dir)")
     parser.add_argument("--wav-dir", type=Path, help="evaluate an arbitrary folder of WAVs instead")
-    parser.add_argument("--config", type=Path,
-                        help="use this config's data paths instead of the ones stored in the checkpoint")
+    parser.add_argument("--current-data", action="store_true",
+                        help="use the data section of utils/config.py instead of the one stored in the checkpoint")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -55,9 +55,9 @@ def main() -> None:
     device = torch.device(args.device)
 
     raw_config = None
-    if args.config:
+    if args.current_data:
         ckpt_cfg = torch.load(args.checkpoint, map_location="cpu", weights_only=False)["config"]
-        ckpt_cfg["data"] = read_raw_config(args.config)["data"]  # only the data section is swapped
+        ckpt_cfg["data"] = default_raw()["data"]  # only the data section is swapped
         raw_config = ckpt_cfg
     model, extractor, cfg, ckpt = load_checkpoint(args.checkpoint, device, TRAINER_DIR, raw_config)
     classes = ckpt["classes"]

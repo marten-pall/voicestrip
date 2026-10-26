@@ -1,7 +1,9 @@
 """Train a keyword-spotting model.
 
-    python train.py --config config.yaml
-    python train.py --config config.yaml -o training.epochs=2 -o features.type=mfcc
+    python train.py
+    python train.py -o training.epochs=2 -o features.type=mfcc
+
+Settings are the dataclass defaults in utils/config.py.
 """
 
 from __future__ import annotations
@@ -34,7 +36,6 @@ NOISE_LABEL = "taust"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("-o", "--override", action="append", default=[], metavar="KEY=VALUE",
                         help="override a config value, e.g. training.epochs=2 (repeatable)")
     return parser.parse_args()
@@ -48,7 +49,7 @@ def make_run_dir(cfg: Config) -> Path:
 
 def main() -> None:
     args = parse_args()
-    cfg = load_config(args.config, TRAINER_DIR, args.override)
+    cfg = load_config(TRAINER_DIR, args.override)
     classes = resolve_classes(cfg.data.classes)
     configured = cfg.model.args.get("num_classes")
     if configured is not None and configured != len(classes):

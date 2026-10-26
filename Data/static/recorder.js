@@ -42,6 +42,7 @@
     source: 'browser',      // 'browser' | 'pi_i2s'
     piPollId: null,
     piPolling: false,
+    piStartedAt: 0,         // performance.now() at Pi recording start (local timer)
     capture: null,          // { ctx, stream, source, node }
     chunks: [],
     totalSamples: 0,
@@ -385,6 +386,7 @@
     els.defaultLabel.disabled = true;
     els.recent.disabled = true;
     setSourceLocked(true);
+    state.piStartedAt = performance.now() - soFar * 1000;
     els.timer.textContent = fmt.timer(soFar);
     els.piMeterBar.style.width = '0%';
     els.piMeter.classList.remove('hidden');
@@ -408,6 +410,10 @@
   }
 
   async function piPoll() {
+    // Timer from the local clock: smooth even when the network to the Pi is slow.
+    const elapsed = (performance.now() - state.piStartedAt) / 1000;
+    els.timer.textContent = fmt.timer(elapsed);
+    els.longWarning.classList.toggle('hidden', elapsed <= WARN_SEC);
     if (state.piPolling) return;  // previous request still in flight
     state.piPolling = true;
     try {
@@ -419,8 +425,6 @@
         resetRecorder();
         return;
       }
-      els.timer.textContent = fmt.timer(s.duration_so_far);
-      els.longWarning.classList.toggle('hidden', s.duration_so_far <= WARN_SEC);
       els.piMeterBar.style.width = `${Math.min(1, s.peak_amplitude) * 100}%`;
       els.piMeterBar.classList.toggle('bg-red-500', s.peak_amplitude > 0.9);
       els.piMeterBar.classList.toggle('bg-emerald-500', s.peak_amplitude <= 0.9);

@@ -24,14 +24,14 @@ Windowsis aktiveeri venv käsuga `venv\Scripts\activate`.
 Kontrolli, et GPU on nähtav: `python -c "import torch; print(torch.cuda.is_available())"`.
 Kui tulemus on `False`, paigalda oma CUDA versioonile sobiv torch (vt https://pytorch.org/get-started/locally/).
 
-Andmed loetakse kohast `../Data/recordings/` (vt `config.yaml` → `data.clips_dir`, `data.csv_path`).
+Andmed loetakse kohast `../Data/recordings/` (vt `utils/config.py` → `DataConfig.clips_dir`, `DataConfig.csv_path`).
 Suhtelised teed arvutatakse `trainer/` kausta suhtes, seega skripte võib käivitada ükskõik kust.
 
 ## Käivitamine tmux-is
 
 ```bash
 tmux new -s train
-python train.py --config config.yaml
+python train.py
 # Ctrl+B D (detach)
 tmux attach -t train
 ```
@@ -39,15 +39,15 @@ tmux attach -t train
 Üksikuid väärtusi saab üle kirjutada ilma configi muutmata (nt kiire suitsutest):
 
 ```bash
-python train.py --config config.yaml -o training.epochs=2
-python train.py --config config.yaml -o features.type=mfcc
+python train.py -o training.epochs=2
+python train.py -o features.type=mfcc
 ```
 
 Iga treening loob kausta `runs/<run_name>_<YYYYMMDD_HHMMSS>/`:
 
 | fail                   | sisu                                                          |
 |------------------------|---------------------------------------------------------------|
-| `config.yaml`          | kasutatud config (koos `-o` muudatustega)                     |
+| `config.yaml`          | koopia kasutatud seadetest (koos `-o` muudatustega)           |
 | `splits.json`          | train/val/test `clip_id`-d (eval kasutab sama testijaotust)   |
 | `metrics.csv`          | epohhi kaupa train/val loss + täpsus + LR                     |
 | `best.pt` / `last.pt`  | parim (val täpsuse järgi) ja viimane kontrollpunkt            |
@@ -83,14 +83,16 @@ class MyModel(nn.Module):
         ...
 ```
 
-Lisa oma hüperparameetrid `config.yaml` → `model.args` alla:
+Lisa oma hüperparameetrid `utils/config.py` → `ModelConfig.args` alla:
 
-```yaml
-model:
-  name: my_model
-  args:
-    channels: 32
-    dropout: 0.3
+```python
+@dataclass
+class ModelConfig:
+    name: str = "my_model"
+    args: dict[str, Any] = field(default_factory=lambda: {
+        "channels": [32, 64, 128],
+        "dropout": 0.2,
+    })
 ```
 
 `num_classes` lisatakse automaatselt — see on klasside arv `data.classes`-is (praegu 5). Kui paned selle
@@ -98,14 +100,14 @@ ise `model.args` alla ja see ei klapi, annab treening vea.
 
 Train:
 ```bash
-python train.py --config config.yaml
+python train.py
 ```
 
 Enne kui mudel on valmis, lõpeb treening veaga `NotImplementedError: Build your model in
 trainer/models/my_model.py ...` — see tähendab, et kõik muu on paigas.
 
 Teiste mudelite lisamiseks: loo uus fail `models/<nimi>.py`, dekoreeri klass
-`@register_model("<nimi>")`, muuda `config.yaml` → `model.name` sellele nimele.
+`@register_model("<nimi>")`, muuda `utils/config.py` → `model.name` sellele nimele.
 Kõik `models/` kausta failid imporditakse automaatselt.
 
 ## Ainult osa klassidega treenimine
@@ -113,15 +115,17 @@ Kõik `models/` kausta failid imporditakse automaatselt.
 Kui kõigi 12 klassi jaoks pole veel andmeid, vali `data.classes` abil alamhulk — mudeli väljundkiht
 tehakse täpselt nii suur, teiste siltide klipid jäetakse välja:
 
-```yaml
-data:
-  classes: [kone, punane, sisse, taust, valja]   # null = kõik 12
+```python
+@dataclass
+class DataConfig:
+    ...
+    classes: list[str] | None = field(default_factory=lambda: ["kone", "punane", "sisse", "taust", "valja"])  # None = kõik 12
 ```
 
 või ilma configi muutmata:
 
 ```bash
-python train.py --config config.yaml -o "data.classes=[kone, punane, sisse, taust, valja]"
+python train.py -o "data.classes=[kone, punane, sisse, taust, valja]"
 ```
 
 - Klassid sorteeritakse tähestikuliselt; väljundi indeks `i` = `classes[i]`. Nimekiri salvestatakse
@@ -151,6 +155,9 @@ Esimene arv peab `overlap`/`recording` puhul olema 0. Teine näitab, kui palju t
 sessioonist (ruum, mikrofon, hääl) kui treeningklipid — mida suurem, seda optimistlikum on testitulemus.
 
 ## Config overview
+
+Kõik seaded on failis `utils/config.py` — dataclass'ide (`DataConfig`, `TrainingConfig`, …) vaikeväärtused. Muuda väärtusi seal —
+`train.py` loeb need otse. Ühekordseks katseks ilma faili muutmata: `python train.py -o training.epochs=2`.
 
 Kõik võtmed on kohustuslikud — puuduv või valesti kirjutatud võti annab kohe vea (vaikeväärtusi koodis pole).
 
