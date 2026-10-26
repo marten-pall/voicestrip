@@ -70,7 +70,7 @@ class SpecAugmentConfig:
 class AugmentConfig:
     enabled: bool = True
     time_shift_ms: float = 100          # random shift within +-100 ms
-    noise_mix_prob: float = 0.3         # probability of mixing a `taust` clip in
+    noise_mix_prob: float = 0.1         # probability of mixing a `taust` clip in
     noise_snr_db: list[float] = field(default_factory=lambda: [5, 20])   # random SNR range
     volume_jitter: float = 0.2          # random gain +-20 %
     specaugment: SpecAugmentConfig = field(default_factory=SpecAugmentConfig)
