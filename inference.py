@@ -29,7 +29,7 @@ def set_rgb(r,g,b):
 def execute(label):
     if label in COLOR_MAP:
         set_rgb(*COLOR_MAP[label])
-    elif label == "kone" or label == "taust" or label == "valja":
+    elif label == "valja":
         set_rgb(0,0,0)
     elif label == "sisse":
         set_rgb(255,255,255)
