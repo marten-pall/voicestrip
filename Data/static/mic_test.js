@@ -1,7 +1,8 @@
-// Pi I2S mic calibration page: live peak meter (short poll) + 3 s test recording.
+// Server-side mic calibration page (Pi I2S or ESP32): live peak meter (short poll) + 3 s test recording.
 (() => {
   'use strict';
 
+  const { apiBase } = window.MIC_TEST;  // '/api/pi' | '/api/esp32'
   const POLL_MS = 100;
   const QUIET = 0.01;
   const CLIPPING = 0.9;
@@ -10,6 +11,7 @@
     error: $('error'), value: $('peak-value'), db: $('peak-db'), bar: $('peak-bar'), hint: $('peak-hint'),
     rtt: $('rtt'), lag: $('lag'),
     testBtn: $('test-btn'), testStatus: $('test-status'), audio: $('test-audio'),
+    deviceLine: $('device-line'), deviceOffline: $('device-offline'),  // ESP32 page only
   };
   let polling = false;
   let paused = false;
@@ -30,17 +32,29 @@
       : 'Hea tase.';
   }
 
+  function renderDevice(device) {
+    if (!els.deviceLine || !device) return;
+    els.deviceOffline.classList.toggle('hidden', device.online);
+    els.testBtn.disabled = !device.online || paused;
+    const details = [device.ip, device.rssi && `${device.rssi} dBm`, device.fw,
+      device.buffer_sec && `puhver ${device.buffer_sec} s`].filter(Boolean).join(' · ');
+    els.deviceLine.textContent = device.online
+      ? `ESP32: võrgus · ${details}`
+      : `ESP32: ei ole võrgus${device.last_seen_sec != null ? ` (viimati ${Math.round(device.last_seen_sec)} s tagasi)` : ''}`;
+  }
+
   async function poll() {
     if (polling || paused || document.hidden) return;
     polling = true;
     try {
       const t0 = performance.now();
-      const res = await fetch('/api/pi/peak');
+      const res = await fetch(`${apiBase}/peak`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       els.rtt.textContent = Math.round(performance.now() - t0);
       els.lag.textContent = data.buffer_lag_ms ?? '–';
       showError('');
+      renderDevice(data.device);
       render(data.peak);
     } catch (err) {
       showError(`Taseme lugemine ebaõnnestus: ${err.message || err}`);
@@ -54,7 +68,7 @@
     els.testBtn.disabled = true;
     els.testStatus.textContent = 'Salvestan… räägi nüüd';
     try {
-      const res = await fetch('/api/pi/test-record', { method: 'POST' });
+      const res = await fetch(`${apiBase}/test-record`, { method: 'POST' });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || `HTTP ${res.status}`);

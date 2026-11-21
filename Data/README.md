@@ -3,8 +3,9 @@
 ## Mis see on
 
 Hääleandmete kogumise tööriist RGB LED kontrolleri märksõnatuvastuse (keyword spotting) mudeli treenimiseks.
-Salvestad brauseris pikema heliklipi, paigutad lainekujule 1-sekundilised kastid märksõnade kohale
-ja tööriist lõikab neist 16 kHz / 16-bit / mono WAV klipid koos CSV sildifailiga.
+Salvestad pikema heliklipi (brauseri mikrofon, Raspberry Pi I2S mikrofon või ESP32 WiFi mikrofon), paigutad
+lainekujule 1-sekundilised kastid märksõnade kohale ja tööriist lõikab neist 16 kHz / 16-bit / mono WAV klipid
+koos CSV sildifailiga.
 
 Töötab ainult lokaalselt (localhost), ühe kasutajaga, ilma sisselogimiseta. Testitud: Windows 11 + Chrome.
 
@@ -77,7 +78,7 @@ Fail: `recordings/labels.csv` (UTF-8 BOM-iga, et Excel kuvaks täpitähed õiges
 | `start_sec`      | klipi algus originaalsalvestuses (sekundites)           |
 | `clip_path`      | tee `recordings/` kausta suhtes, nt `clips/punane/….wav` |
 | `recording_name` | salvestuse nimi                                         |
-| `source`         | `browser` (hiljem `esp32`)                              |
+| `source`         | `browser`, `pi_i2s` või `esp32`                         |
 | `created_at`     | ISO ajatempel                                           |
 
 Pythonis:
@@ -116,9 +117,9 @@ Kõik failid: WAV, 16-bit PCM, mono, 16 000 Hz. Kaust `recordings/` luuakse auto
 |---|---|---|
 | `browser` | brauseri mikrofon (Web Audio API) | brauser avab lehe HTTPS-i või `localhost`-i kaudu |
 | `pi_i2s` | Raspberry Pi INMP441 I2S mikrofon, salvestab server | rakendus töötab Pi'l ja mikrofon on leitud |
-| `esp32` | tulevikus ESP32 üleslaadimised | veel mitte |
+| `esp32` | ESP32-S3 + INMP441, saadab heli WiFi kaudu serverisse | alati valikus; RECORD töötab, kui ESP32 on võrgus (roheline täpp) |
 
-Kui mõlemad on saadaval, saab salvestuslehel valida ("Allikas"); valik jäetakse brauserisse meelde.
+Salvestuslehel saab allika valida ("Allikas"); valik jäetakse brauserisse meelde.
 Brauserid lubavad mikrofoni ainult HTTPS-i või `localhost`-i kaudu — kui avad lehe `http://<pi-ip>:5000`
 kaudu (telefon, sülearvuti), peidetakse brauseri mikrofon ja Pi I2S on ainus allikas.
 Playback-lehel saab klippe allika järgi filtreerida.
@@ -160,6 +161,102 @@ Kui mikrofoni ei leita, kuigi see on ühendatud:
 
 Salvestamine: 48 kHz stereo int32 (INMP441 omaformaat) → vasak kanal → 16 kHz mono 16-bit WAV, sama
 formaat mis brauseri salvestustel. Edasine töö (kastid, Accept, klipid, CSV) on täpselt sama.
+
+## ESP32-S3 + INMP441 (WiFi mikrofon)
+
+ESP32 on "kaugmikrofon": salvestamist juhid brauserist täpselt nagu Pi I2S puhul (RECORD / STOP),
+ESP32 saadab heli WiFi kaudu serverisse ja pärast Stop-i avaneb sama lainekuju-redaktor (kastid, Accept,
+klipid, CSV). Kood: `esp32/collector/collector.ino` (ESP32) ja `Data/esp32_link.py` + `/api/esp32/*` (server).
+
+### Ühendused
+
+| INMP441 | ESP32-S3 |
+|---|---|
+| SCK | GPIO 4 |
+| WS | GPIO 3 |
+| SD | GPIO 2 |
+| VDD | 3.3V |
+| GND | GND |
+| L/R | GND (vasak kanal) |
+
+Olekutuled (MOSFET-plaat): R = GPIO 9, G = GPIO 10, B = GPIO 11. Plaat on **tagurpidi loogikaga**
+(LOW = põleb, nagu Pi `inference.py`-s), seega vaikimisi `LED_ACTIVE_LOW 1`. Vale seade paneb kogu riba
+täies valges heleduses põlema — 12 V adapter läheb ülekoormusse ja vilgub (lülitub välja-sisse). Kui sinu
+plaadil on HIGH = põleb, pane `config.h`-sse `#define LED_ACTIVE_LOW 0`.
+
+### 1. Arduino IDE
+
+1. **Tools → Board → Boards Manager**: paigalda "esp32" (Espressif Systems), versioon **3.x**.
+2. Ava `esp32/collector/collector.ino`.
+3. Kopeeri `config.example.h` → `config.h` (samas kaustas) ja täida:
+   - `WIFI_SSID`, `WIFI_PASSWORD` — ainult **2.4 GHz** võrk;
+   - `SERVER_HOST` — selle arvuti/Pi IP, kus jookseb `app.py` (app.py prindib käivitamisel õige rea);
+   - `SERVER_PORT` — vaikimisi `5000`.
+
+   `config.h` on `.gitignore`-is, parool git'i ei satu.
+4. **Tools**: Board = *ESP32S3 Dev Module*, USB CDC On Boot = *Enabled* (Serial Monitor üle USB),
+   PSRAM = *OPI PSRAM* kui plaat on N8R8/N16R8 (muidu *Disabled*). Flash Size vastavalt plaadile.
+5. **Upload**, seejärel **Serial Monitor** (115200 baud): näed WiFi IP-d, puhvri suurust ja serveri olekut.
+
+Ilma PSRAM-ita on helipuhver ~4 s, PSRAM-iga ~33 s — nii palju WiFi katkestust elab salvestus üle ilma heli kaotamata.
+
+### 2. Server
+
+ESP32 peab serverini jõudma, seega käivita kohtvõrgus nähtavana:
+
+```powershell
+python app.py --host 0.0.0.0
+```
+
+Windowsis küsib tulemüür esimesel korral luba — luba Python **Private** võrgus. Kui aken jäi vahele:
+*Windows Security → Firewall → Allow an app* → Python → Private. Brauseris ava ikka `http://localhost:5000`
+(siis on ka brauseri mikrofon saadaval).
+
+### 3. Kontroll ja salvestamine
+
+1. ESP32 LED muutub roheliseks ja salvestuslehel on "ESP32 mikrofon" kõrval roheline täpp.
+2. Ava `/esp32-mic-test` (link "Mikrofoni test →" ESP32 allika kõrval): elav tasemeriba, WiFi signaal ja
+   3-sekundiline testsalvestus. Räägi — peak peaks tõusma üle 0.01.
+3. Salvestuslehel vali **Allikas: ESP32 mikrofon** → RECORD → räägi → STOP → paiguta kastid → Accept.
+
+Kui leht salvestamise ajal uuesti laadida, jätkab see käimasolevat salvestust (nagu Pi puhul).
+
+### LED-ide tähendus
+
+| LED | olek |
+|---|---|
+| sinine vilgub | ühendab WiFi-ga |
+| kollane vilgub | WiFi olemas, server ei vasta |
+| roheline | võrgus, ootab |
+| tsüaan | mikrofoni testleht on lahti |
+| punane | salvestab |
+| punane vilgub kiiresti | üleslaadimine ebaõnnestub (heli kogub puhvrisse) |
+
+Heledus: `#define LED_BRIGHTNESS 24` (0–255) `config.h`-s; `0` hoiab LED-id kustu.
+
+### Tõrkeotsing
+
+- **Täpp jääb halliks / LED vilgub kollaselt** — vale `SERVER_HOST`, `app.py` pole käivitatud `--host 0.0.0.0`-ga,
+  tulemüür blokeerib või ESP32 ja arvuti on eri võrkudes (külaliste WiFi). Kontrolli telefonist `http://<ip>:5000`.
+- **Tase alati täpselt 0** — kontrolli SD/WS/SCK juhtmeid ja et L/R on GND-s. Kui L/R on VDD-s, lisa `config.h`-sse
+  `#define I2S_MIC_SLOT I2S_STD_SLOT_RIGHT`.
+- **Hoiatus "ESP32 puhver sai täis"** — WiFi oli liiga aeglane ja osa heli jäi vahele. Vii ESP32 ruuterile lähemale
+  (signaal on näha testlehel, alla −75 dBm on nõrk).
+- **Liiga vaikne** — `GAIN_SHIFT 16` annab sama taseme mis Pi I2S salvestused (sama mikrofon, sama skaala —
+  hea treeningandmete ühtluse jaoks). `14` teeb 4× valjemaks, aga siis erineb tase Pi andmetest.
+
+### Kuidas see töötab
+
+ESP32 on alati HTTP klient (serveri jaoks pole vaja ESP32 aadressi teada):
+
+- ootel: `GET /api/esp32/poll` iga 300 ms (ühtlasi "elusolek" — 3 s vaikust = võrgust väljas);
+- salvestamisel: `POST /api/esp32/chunk?stream=<id>&seq=<n>&dropped=<k>&final=<0|1>`, keha = ~0.25 s toorest
+  16 kHz int16 PCM-i;
+- iga vastus on üks tekstirida: `idle`, `stream <id>` või `stop <id>`.
+
+STOP-i peale saadab ESP32 puhvrisse jäänud heli (viimane tükk `final=1`), server ootab seda kuni paar sekundit ja
+salvestab WAV-i tavalise `store_recording()`-iga (`source=esp32`). Korduvaid tükke (kadunud vastuse järel)
+tuntakse `seq` järgi ära. Kui ESP32-st pole 6 s heli tulnud, peatab brauser salvestuse ise ja säilitab saadud osa.
 
 ## Salvestuste toomine Pi'lt arvutisse
 
@@ -204,7 +301,5 @@ faile üle ei kirjutata ja mõlemast CSV-st tehakse enne muutmist `.bak` koopia.
 
 ## Edaspidi
 
-- **ESP32 integratsioon** — CSV-s on juba väli `source` (`esp32`). `POST /api/upload-recording` võtab vastu ka
-  multipart-päringu (`audio` fail + väljad `name`, `default_label`, `source=esp32`).
 - **Edge Impulse export** — klipid on juba kaustades sildi kaupa (`clips/<label>/`), mis sobib otse
   Edge Impulse'i üleslaadimiseks (silt kaustanime järgi).

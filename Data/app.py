@@ -3,7 +3,7 @@
 Single-user Flask app. Records 16 kHz mono PCM from one of these sources:
   - "browser": Web Audio API in the user's browser (needs HTTPS or localhost)
   - "pi_i2s":  INMP441 I2S mic read on the server via sounddevice (Raspberry Pi only, see pi_mic.py)
-  - "esp32":   reserved for future uploads (POST /api/upload-recording with source=esp32)
+  - "esp32":   ESP32-S3 + INMP441 streaming over WiFi (see esp32_link.py, ../esp32/collector/)
 stores the full recording as WAV and slices labelled 1.0 s clips from it.
 Storage is plain files + CSV (no database).
 
@@ -15,6 +15,8 @@ python app.py --host 0.0.0.0
 
 import argparse
 import csv
+import io
+import logging
 import re
 import sys
 import threading
@@ -26,6 +28,7 @@ from pathlib import Path
 
 from flask import Flask, Response, abort, jsonify, render_template, request, send_from_directory
 
+import esp32_link
 import pi_mic
 
 # --------------------------------------------------------------------------- #
@@ -73,6 +76,9 @@ SNAP_SEC = 0.05
 DEFAULT_PEAKS = 2000
 SOURCES = ("browser", "pi_i2s", "esp32")
 PI_TEST_SECONDS = 3.0
+ESP32_MAX_CHUNK_BYTES = 256 * 1024
+# The ESP32 polls several times a second - successful device requests stay out of the console
+QUIET_LOG_PATHS = ("/api/esp32/poll", "/api/esp32/chunk", "/api/esp32/status")
 
 BASE_DIR = Path(__file__).resolve().parent
 REC_DIR = BASE_DIR / "recordings"
@@ -98,6 +104,16 @@ app.json.sort_keys = False
 app.jinja_env.policies["json.dumps_kwargs"] = {"sort_keys": False}
 _lock = threading.Lock()  # serialises CSV writes and recording-id allocation
 mic = pi_mic.PiMic(pi_mic.detect_pi_mic())  # .available can turn False at runtime (see self_test)
+esp32 = esp32_link.Esp32Link()
+
+
+class QuietDevicePolling(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not ('" 200 ' in message and any(path in message for path in QUIET_LOG_PATHS))
+
+
+logging.getLogger("werkzeug").addFilter(QuietDevicePolling())
 
 
 # --------------------------------------------------------------------------- #
@@ -158,9 +174,8 @@ def next_recording_id() -> str:
     """YYYYMMDD_NNN with NNN = 1 + highest counter used today."""
     prefix = datetime.now().strftime("%Y%m%d")
     used = [path.stem for path in ORIGINAL_DIR.glob(f"{prefix}_*.wav")]
-    active = mic.active_recording_id()  # Pi recording in progress: its WAV doesn't exist yet
-    if active:
-        used.append(active)
+    # Pi / ESP32 recording in progress: its WAV doesn't exist yet
+    used += [rid for rid in (mic.active_recording_id(), esp32.active_recording_id()) if rid]
     highest = 0
     for stem in used:
         parts = stem.split("_")
@@ -230,13 +245,19 @@ def clip_summary(row: dict) -> dict:
 # Helpers: audio (stdlib wave only)
 # --------------------------------------------------------------------------- #
 
-def write_wav(path: Path, pcm: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(path), "wb") as w:
+def wav_bytes(pcm: bytes) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
         w.setnchannels(CHANNELS)
         w.setsampwidth(SAMPLE_WIDTH)
         w.setframerate(SAMPLE_RATE)
         w.writeframes(pcm)
+    return buf.getvalue()
+
+
+def write_wav(path: Path, pcm: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(wav_bytes(pcm))
 
 
 def read_wav(path: Path) -> bytes:
@@ -301,8 +322,16 @@ def playback_page():
 
 @app.get("/pi-mic-test")
 def pi_mic_test_page():
-    return render_template("pi_mic_test.html", active="recorder", test_seconds=PI_TEST_SECONDS,
+    return render_template("mic_test.html", active="recorder", source="pi_i2s", api_base="/api/pi",
+                           mic_title="Pi I2S mikrofon", available=mic.available, test_seconds=PI_TEST_SECONDS,
                            devices=pi_mic.input_devices() if not mic.available else [])
+
+
+@app.get("/esp32-mic-test")
+def esp32_mic_test_page():
+    return render_template("mic_test.html", active="recorder", source="esp32", api_base="/api/esp32",
+                           mic_title="ESP32 + INMP441 mikrofon", available=True, test_seconds=PI_TEST_SECONDS,
+                           devices=[])
 
 
 @app.get("/review/<recording_id>")
@@ -387,7 +416,7 @@ def upload_recording():
 
 @app.get("/api/sources")
 def list_sources():
-    return jsonify({"browser": True, "pi_i2s": mic.available, "esp32": False})
+    return jsonify({"browser": True, "pi_i2s": mic.available, "esp32": esp32.online})
 
 
 def pi_error(exc: Exception):
@@ -455,6 +484,107 @@ def pi_test_record():
         return pi_error(exc)
     peak = float(abs(audio).max()) if len(audio) else 0.0
     return Response(pi_mic.wav_bytes(audio), mimetype="audio/wav", headers={"X-Peak": f"{peak:.4f}"})
+
+
+# --------------------------------------------------------------------------- #
+# ESP32-S3 + INMP441 over WiFi (the device streams to us, see esp32_link.py)
+# --------------------------------------------------------------------------- #
+
+def esp32_device_info() -> dict:
+    args = request.args
+    return {"ip": request.remote_addr, "rssi": args.get("rssi", ""), "fw": args.get("fw", ""),
+            "buffer_sec": args.get("buf", ""), "uptime_sec": args.get("up", "")}
+
+
+def esp32_reply(command: str, status: int = 200) -> Response:
+    """Device endpoints answer with one plain-text command line (see esp32_link.py)."""
+    return Response(command + "\n", status=status, mimetype="text/plain")
+
+
+def esp32_error(exc: Exception):
+    if isinstance(exc, esp32_link.Esp32Error):
+        return api_error(str(exc), 409)
+    print(f"ESP32 error: {type(exc).__name__}: {exc}", flush=True)
+    return api_error(f"ESP32 viga: {exc}", 500)
+
+
+@app.get("/api/esp32/poll")
+def esp32_poll():
+    return esp32_reply(esp32.poll(esp32_device_info()))
+
+
+@app.post("/api/esp32/chunk")
+def esp32_chunk():
+    try:
+        seq = int(request.args["seq"])
+        dropped = max(int(request.args.get("dropped", 0)), 0)
+    except (KeyError, ValueError):
+        return esp32_reply("error bad seq/dropped", 400)
+    if (request.content_length or 0) > ESP32_MAX_CHUNK_BYTES:
+        return esp32_reply("error chunk too large", 413)
+    pcm = request.get_data()
+    pcm = pcm[: len(pcm) - (len(pcm) % SAMPLE_WIDTH)]
+    command = esp32.push_chunk(request.args.get("stream", ""), seq, dropped, request.args.get("final") == "1",
+                               pcm, esp32_device_info())
+    return esp32_reply(command)
+
+
+@app.get("/api/esp32/status")
+def esp32_status():
+    return jsonify(esp32.device_info())
+
+
+@app.post("/api/esp32/start-recording")
+def esp32_start_recording():
+    data = request.get_json(silent=True) or {}
+    default_label = str(data.get("default_label") or DEFAULT_LABEL)
+    if default_label not in LABELS:
+        return api_error(f"Unknown label: {default_label}")
+    try:
+        with _lock:  # reserve the id
+            recording_id = next_recording_id()
+            started_at = esp32.start(recording_id, str(data.get("name") or ""), default_label)
+    except Exception as exc:  # noqa: BLE001
+        return esp32_error(exc)
+    print(f"Started ESP32 recording {recording_id}", flush=True)
+    return jsonify({"recording_id": recording_id, "started_at": started_at})
+
+
+@app.get("/api/esp32/recording-status")
+def esp32_recording_status():
+    return jsonify(esp32.status())
+
+
+@app.post("/api/esp32/stop-recording")
+def esp32_stop_recording():
+    data = request.get_json(silent=True) or {}
+    recording_id = str(data.get("recording_id", ""))
+    try:
+        pcm, meta = esp32.stop(recording_id)
+    except Exception as exc:  # noqa: BLE001
+        return esp32_error(exc)
+    result = store_recording(pcm, meta["name"], meta["default_label"], "esp32", recording_id=recording_id)
+    print(f"Stopped ESP32 recording {recording_id} ({result['duration_sec']:.1f} s)"
+          + (f" - {meta['warning']}" if meta["warning"] else ""), flush=True)
+    return jsonify({**result, "warning": meta["warning"],
+                    "waveform": compute_peaks(pcm, parse_peaks(data.get("peaks")))})
+
+
+@app.get("/api/esp32/peak")
+def esp32_peak():
+    """Never an error when the device is offline: the test page shows device.online instead."""
+    return jsonify({"peak": round(esp32.current_peak(), 4), "recording": esp32.active_recording_id() is not None,
+                    "buffer_lag_ms": esp32.current_lag_ms(), "device": esp32.device_info()})
+
+
+@app.post("/api/esp32/test-record")
+def esp32_test_record():
+    """Records PI_TEST_SECONDS from the ESP32 and returns the WAV directly (nothing is saved)."""
+    try:
+        pcm = esp32.test_record(PI_TEST_SECONDS)
+    except Exception as exc:  # noqa: BLE001
+        return esp32_error(exc)
+    return Response(wav_bytes(pcm), mimetype="audio/wav", headers={"X-Peak": f"{esp32_link.pcm_peak(pcm):.4f}"})
 
 
 @app.post("/api/save-clips")
@@ -657,6 +787,11 @@ if __name__ == "__main__":
     print("  Voice Collector")
     print(f"  Salvestused: {REC_DIR}")
     print(f"  Pi I2S mikrofon: {'olemas' if mic.available else 'ei ole (ainult brauseri mikrofon)'}")
+    if args.host == "0.0.0.0":
+        print(f"  ESP32 mikrofon: config.h -> SERVER_HOST \"{lan_address() or '<selle-masina-ip>'}\", "
+              f"SERVER_PORT {args.port}  (test: /esp32-mic-test)")
+    else:
+        print("  ESP32 mikrofon: vajab --host 0.0.0.0 (muidu ei pääse ESP32 serverini)")
     print(f"  Ava Chrome ja mine: http://localhost:{args.port}")
     if args.host == "0.0.0.0":
         ip = lan_address()

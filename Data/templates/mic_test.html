@@ -1,16 +1,16 @@
 {% extends "base.html" %}
-{% block title %}Pi mikrofoni test · Voice Collector{% endblock %}
+{% block title %}{{ mic_title }}i test · Voice Collector{% endblock %}
 
 {% block content %}
   <div id="error" class="hidden rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"></div>
 
   <section class="rounded-xl bg-white shadow-sm border border-slate-200 p-5 space-y-5">
     <div class="flex flex-wrap items-center justify-between gap-2">
-      <h1 class="font-semibold text-lg">Pi I2S mikrofoni test</h1>
+      <h1 class="font-semibold text-lg">{{ mic_title }}i test</h1>
       <a href="/" class="text-sm text-indigo-600 hover:underline">← Tagasi salvestama</a>
     </div>
 
-    {% if not pi_mic_available %}
+    {% if not available %}
       <div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 space-y-2">
         <p class="font-semibold">Pi I2S mikrofoni ei leitud.</p>
         <p>Kontrolli I2S overlay'd failis <code>/boot/firmware/config.txt</code>, juhtmeid ja et
@@ -22,6 +22,17 @@
         </ul>
       </div>
     {% else %}
+      {% if source == "esp32" %}
+        <p id="device-line" class="text-sm font-mono text-slate-600">ESP32: ootan ühendust…</p>
+        <div id="device-offline" class="hidden rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 space-y-1">
+          <p class="font-semibold">ESP32 pole võrgus (pole viimase 3 s jooksul serveriga ühendust võtnud).</p>
+          <p>• ESP32 LED vilgub <b>siniselt</b> → ei saa WiFi-ga ühendust: kontrolli <code>WIFI_SSID</code> / <code>WIFI_PASSWORD</code> (ainult 2.4 GHz).</p>
+          <p>• LED vilgub <b>kollaselt</b> → WiFi on, aga server ei vasta: <code>SERVER_HOST</code> peab olema selle masina IP,
+            rakendus käivitatud <code>python app.py --host 0.0.0.0</code> ja Windowsi tulemüür peab Pythonit lubama.</p>
+          <p>• Detailid: Arduino IDE → Serial Monitor (115200 baud).</p>
+        </div>
+      {% endif %}
+
       <div class="space-y-2">
         <div class="flex items-baseline justify-between text-sm">
           <span class="text-slate-500 font-medium">Praegune tase (peak)</span>
@@ -52,11 +63,18 @@
         <p>Kui peak &lt; 0.01 rääkides, on mikrofon liiga vaikne — tule lähemale või kontrolli juhtmeid.</p>
         <p>Kui peak &gt; 0.9 pidevalt, mikrofon lõikab (clipping) või on juhtmestikuga probleem.</p>
         <p>Vaikuses peaks tase olema väike, aga mitte täpselt 0 — täielik 0 viitab tavaliselt puuduvale andmesignaalile (SD/WS/SCK juhtmed).</p>
+        {% if source == "esp32" %}
+          <p>ESP32: kui tase on alati täpselt 0, kontrolli et INMP441 L/R on GND-s; proovi ka <code>config.h</code>-s
+            <code>#define I2S_MIC_SLOT I2S_STD_SLOT_RIGHT</code>. "Heli puhvri viivitus" üle ~1000 ms tähendab aeglast WiFi-t.</p>
+        {% endif %}
       </div>
     {% endif %}
   </section>
 {% endblock %}
 
 {% block scripts %}
-  {% if pi_mic_available %}<script src="{{ url_for('static', filename='pi_mic_test.js') }}"></script>{% endif %}
+  {% if available %}
+    <script>window.MIC_TEST = { apiBase: {{ api_base | tojson }} };</script>
+    <script src="{{ url_for('static', filename='mic_test.js') }}"></script>
+  {% endif %}
 {% endblock %}

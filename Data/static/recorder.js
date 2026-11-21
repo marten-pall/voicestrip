@@ -15,7 +15,16 @@
 
   const { labels, colors, defaultLabel, reviewId, piMicAvailable } = window.APP;
   const SOURCE_KEY = 'voicecollector.source';
-  const PI_POLL_MS = 200;
+  const SERVER_POLL_MS = 200;
+  const ESP32_STATUS_MS = 2000;
+  // Sources captured on the server side: the browser only starts/stops them, shows the
+  // level, and then loads the finished WAV into the same editor. Same API shape for both.
+  const SERVER_SOURCES = {
+    pi_i2s: { api: '/api/pi', name: 'Pi I2S mikrofon', testUrl: '/pi-mic-test' },
+    esp32: { api: '/api/esp32', name: 'ESP32 mikrofon', testUrl: '/esp32-mic-test' },
+  };
+  const BADGE_ON = ['border-emerald-200', 'bg-emerald-50', 'text-emerald-700'];
+  const BADGE_OFF = ['border-slate-200', 'bg-slate-50', 'text-slate-500'];
   const { fmt, toast, confirmDialog, apiJson } = window.UI;
   const $ = (id) => document.getElementById(id);
 
@@ -32,17 +41,19 @@
     addBoxBtn: $('add-box-btn'), playAllBtn: $('play-all-btn'),
     discardBtn: $('discard-btn'), deleteAllBtn: $('delete-all-btn'),
     newRecordingBtn: $('new-recording-btn'), acceptBtn: $('accept-btn'),
-    sourceBox: $('source-box'), sourceBrowserLabel: $('source-browser-label'), piTestLink: $('pi-test-link'),
-    piBadge: $('pi-badge'), piMeter: $('pi-meter'), piMeterBar: $('pi-meter-bar'),
+    sourceBox: $('source-box'), sourceBrowserLabel: $('source-browser-label'), micTestLink: $('mic-test-link'),
+    sourceBadge: $('source-badge'), levelMeter: $('level-meter'), levelMeterBar: $('level-meter-bar'),
+    esp32Dot: $('esp32-dot'),
   };
 
   const state = {
     mode: 'idle', // idle | recording | processing | editing | saving
     reviewMode: !!reviewId,
-    source: 'browser',      // 'browser' | 'pi_i2s'
-    piPollId: null,
-    piPolling: false,
-    piStartedAt: 0,         // performance.now() at Pi recording start (local timer)
+    source: 'browser',      // 'browser' | 'pi_i2s' | 'esp32'
+    esp32Online: false,
+    srvPollId: null,
+    srvPolling: false,
+    srvStartedAt: 0,        // performance.now() at server recording start (local timer)
     capture: null,          // { ctx, stream, source, node }
     chunks: [],
     totalSamples: 0,
@@ -354,7 +365,7 @@
     }
   }
 
-  // Load a recording that already exists on the server (review mode, finished Pi recording).
+  // Load a recording that already exists on the server (review mode, finished Pi/ESP32 recording).
   async function openInEditor(meta) {
     showEditorShell();
     const res = await fetch(`/recordings/${meta.original_path.split('/').map(encodeURIComponent).join('/')}`);
@@ -366,17 +377,20 @@
     enterEditor(meta, computePeaks(state.samples, state.view.peakCount));
   }
 
-  // ------------------------------------------------------- Pi I2S source
-  // Audio is captured on the server (Raspberry Pi); the browser only starts/stops
-  // it, shows the level, and then loads the finished WAV into the same editor.
+  // --------------------------------------------- server-side sources (Pi I2S, ESP32)
+  // Audio is captured on the server (Pi) or streamed to it over WiFi (ESP32); the browser
+  // only starts/stops it, shows the level, and then loads the finished WAV into the same editor.
 
-  function stopPiPolling() {
-    clearInterval(state.piPollId);
-    state.piPollId = null;
-    els.piMeter.classList.add('hidden');
+  const isServerSource = (source) => source in SERVER_SOURCES;
+  const srv = () => SERVER_SOURCES[state.source];
+
+  function stopServerPolling() {
+    clearInterval(state.srvPollId);
+    state.srvPollId = null;
+    els.levelMeter.classList.add('hidden');
   }
 
-  function enterPiRecording(recordingId, soFar = 0) {
+  function enterServerRecording(recordingId, soFar = 0) {
     state.recordingId = recordingId;
     state.mode = 'recording';
     els.recordBtn.textContent = '■ STOP';
@@ -386,103 +400,134 @@
     els.defaultLabel.disabled = true;
     els.recent.disabled = true;
     setSourceLocked(true);
-    state.piStartedAt = performance.now() - soFar * 1000;
+    state.srvStartedAt = performance.now() - soFar * 1000;
     els.timer.textContent = fmt.timer(soFar);
-    els.piMeterBar.style.width = '0%';
-    els.piMeter.classList.remove('hidden');
-    setStatus(`Salvestan Pi I2S mikrofonist (${recordingId})…`);
-    clearInterval(state.piPollId);
-    state.piPollId = setInterval(piPoll, PI_POLL_MS);
+    els.levelMeterBar.style.width = '0%';
+    els.levelMeter.classList.remove('hidden');
+    setStatus(`Salvestan: ${srv().name} (${recordingId})…`);
+    clearInterval(state.srvPollId);
+    state.srvPollId = setInterval(serverPoll, SERVER_POLL_MS);
   }
 
-  async function piStart() {
+  async function serverStart() {
     hideError();
     try {
-      const data = await apiJson('/api/pi/start-recording', {
+      const data = await apiJson(`${srv().api}/start-recording`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: els.name.value.trim(), default_label: els.defaultLabel.value }),
       });
-      enterPiRecording(data.recording_id);
+      enterServerRecording(data.recording_id);
     } catch (err) {
-      showError('Pi mikrofoni salvestus ei alanud.', String(err.message || err));
+      showError(`${srv().name}: salvestus ei alanud.`, String(err.message || err));
     }
   }
 
-  async function piPoll() {
-    // Timer from the local clock: smooth even when the network to the Pi is slow.
-    const elapsed = (performance.now() - state.piStartedAt) / 1000;
+  async function serverPoll() {
+    // Timer from the local clock: smooth even when the network to the server is slow.
+    const elapsed = (performance.now() - state.srvStartedAt) / 1000;
     els.timer.textContent = fmt.timer(elapsed);
     els.longWarning.classList.toggle('hidden', elapsed <= WARN_SEC);
-    if (state.piPolling) return;  // previous request still in flight
-    state.piPolling = true;
+    if (state.srvPolling) return;  // previous request still in flight
+    state.srvPolling = true;
     try {
-      const s = await apiJson('/api/pi/recording-status');
+      const s = await apiJson(`${srv().api}/recording-status`);
       if (state.mode !== 'recording') return;
       if (!s.active || s.recording_id !== state.recordingId) {
-        stopPiPolling();
-        showError('Pi salvestus pole enam aktiivne.', 'Serveris ei käi seda salvestust (rakendus taaskäivitati?).');
+        stopServerPolling();
+        showError(`${srv().name}: salvestus pole enam aktiivne.`, 'Serveris ei käi seda salvestust (rakendus taaskäivitati?).');
         resetRecorder();
         return;
       }
-      els.piMeterBar.style.width = `${Math.min(1, s.peak_amplitude) * 100}%`;
-      els.piMeterBar.classList.toggle('bg-red-500', s.peak_amplitude > 0.9);
-      els.piMeterBar.classList.toggle('bg-emerald-500', s.peak_amplitude <= 0.9);
+      els.levelMeterBar.style.width = `${Math.min(1, s.peak_amplitude) * 100}%`;
+      els.levelMeterBar.classList.toggle('bg-red-500', s.peak_amplitude > 0.9);
+      els.levelMeterBar.classList.toggle('bg-emerald-500', s.peak_amplitude <= 0.9);
       if (s.failed) {
-        showError('Pi mikrofoni salvestus katkes.', `${s.error} Salvestan seni salvestatud osa.`);
-        await piStop();
+        showError(`${srv().name}: salvestus katkes.`, `${s.error} Salvestan seni salvestatud osa.`);
+        await serverStop();
       }
     } catch (err) {
-      console.warn('Pi status poll failed (will retry)', err);  // transient network error
+      console.warn('Recording status poll failed (will retry)', err);  // transient network error
     } finally {
-      state.piPolling = false;
+      state.srvPolling = false;
     }
   }
 
-  async function piStop() {
-    stopPiPolling();
+  async function serverStop() {
+    stopServerPolling();
     state.mode = 'processing';
     els.recordBtn.disabled = true;
     els.recordBtn.classList.remove('ring-4', 'ring-red-200');
     setStatus('Processing…');
     try {
-      const data = await apiJson('/api/pi/stop-recording', {
+      const data = await apiJson(`${srv().api}/stop-recording`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ recording_id: state.recordingId }),
       });
       if (data.warning) {
-        showError('Salvestus katkes enneaegselt.', `${data.warning}. Salvestatud osa (${data.duration_sec.toFixed(1)} s) on alles.`);
+        showError('Salvestusega oli probleeme.', `${data.warning}. Salvestatud osa (${data.duration_sec.toFixed(1)} s) on alles.`);
       }
       await openInEditor({ ...data, clips: [] });
       loadRecent();
     } catch (err) {
-      showError('Pi salvestuse lõpetamine ebaõnnestus.', String(err.message || err));
+      showError(`${srv().name}: salvestuse lõpetamine ebaõnnestus.`, String(err.message || err));
       resetRecorder();
     }
   }
 
-  // A Pi recording keeps running on the server if this page is reloaded: pick it up again.
-  async function resumePiRecording() {
-    try {
-      const s = await apiJson('/api/pi/recording-status');
-      if (s.active && state.mode === 'idle') {
-        setSource('pi_i2s', false);
-        enterPiRecording(s.recording_id, s.duration_so_far);
+  // A server-side recording keeps running if this page is reloaded: pick it up again.
+  async function resumeServerRecording() {
+    for (const source of availableSources().filter(isServerSource)) {
+      try {
+        const s = await apiJson(`${SERVER_SOURCES[source].api}/recording-status`);
+        if (s.active && state.mode === 'idle') {
+          setSource(source, false);
+          enterServerRecording(s.recording_id, s.duration_so_far);
+          return;
+        }
+      } catch (err) {
+        console.warn(`Could not check ${source} recording status`, err);
       }
-    } catch (err) {
-      console.warn('Could not check Pi recording status', err);
     }
+  }
+
+  // ESP32 online = it polled the server in the last 3 s. Shown as a dot next to its radio
+  // button and as the badge; RECORD is disabled while it is offline.
+  async function refreshEsp32Status() {
+    try {
+      const s = await apiJson('/api/esp32/status');
+      state.esp32Online = !!s.online;
+      const title = s.online ? `ESP32 võrgus (${s.ip || '?'}, ${s.rssi || '?'} dBm)` : 'ESP32 ei ole võrgus';
+      els.esp32Dot.classList.toggle('bg-emerald-500', state.esp32Online);
+      els.esp32Dot.classList.toggle('bg-slate-300', !state.esp32Online);
+      els.esp32Dot.title = title;
+    } catch (err) {
+      state.esp32Online = false;
+    }
+    if (state.source === 'esp32') renderSourceBadge();
+  }
+
+  function renderSourceBadge() {
+    const source = state.source;
+    els.sourceBadge.classList.toggle('hidden', !isServerSource(source));
+    if (!isServerSource(source)) return;
+    const on = source === 'pi_i2s' || state.esp32Online;
+    els.sourceBadge.textContent = source === 'pi_i2s' ? 'Pi mic active' : (on ? 'ESP32 võrgus' : 'ESP32 ei ole võrgus');
+    els.sourceBadge.classList.remove(...(on ? BADGE_OFF : BADGE_ON));
+    els.sourceBadge.classList.add(...(on ? BADGE_ON : BADGE_OFF));
+    if (state.mode === 'idle') els.recordBtn.disabled = !on;
   }
 
   // ------------------------------------------------------- source choice
 
-  // getUserMedia only exists on HTTPS or localhost, so opened as http://<pi-ip>
-  // the browser mic is hidden and the Pi mic is the only source.
+  // getUserMedia only exists on HTTPS or localhost, so opened as http://<ip>
+  // the browser mic is hidden. The ESP32 is always listed (online or not).
   function availableSources() {
     const list = [];
     if (window.isSecureContext) list.push('browser');
     if (piMicAvailable) list.push('pi_i2s');
+    list.push('esp32');
     return list;
   }
 
@@ -491,7 +536,7 @@
     let saved = null;
     try { saved = localStorage.getItem(SOURCE_KEY); } catch (_) { /* storage blocked */ }
     if (available.includes(saved)) return saved;
-    return available.includes('pi_i2s') ? 'pi_i2s' : 'browser';
+    return ['pi_i2s', 'browser', 'esp32'].find((s) => available.includes(s));
   }
 
   function setSource(source, persist = true) {
@@ -500,13 +545,17 @@
       try { localStorage.setItem(SOURCE_KEY, source); } catch (_) { /* storage blocked */ }
     }
     document.querySelectorAll('input[name="source"]').forEach((r) => { r.checked = r.value === source; });
-    const pi = source === 'pi_i2s';
-    els.piBadge.classList.toggle('hidden', !pi);
-    if (els.piTestLink) els.piTestLink.classList.toggle('hidden', !pi);
+    const server = isServerSource(source);
+    if (els.micTestLink) {
+      els.micTestLink.classList.toggle('hidden', !server);
+      if (server) els.micTestLink.href = SERVER_SOURCES[source].testUrl;
+    }
     hideError();
-    const unsupported = pi ? null : supportCheck();  // browser capabilities matter only for the browser mic
+    const unsupported = server ? null : supportCheck();  // browser capabilities matter only for the browser mic
     if (unsupported) showError('Browser not supported.', unsupported);
     if (state.mode === 'idle') els.recordBtn.disabled = !!unsupported;
+    renderSourceBadge();
+    if (source === 'esp32') refreshEsp32Status();
   }
 
   function setSourceLocked(locked) {
@@ -888,21 +937,23 @@
     els.recent.value = '';
     els.timer.textContent = '00:00';
     els.longWarning.classList.add('hidden');
-    stopPiPolling();
+    stopServerPolling();
     setSourceLocked(false);
     setStatus('Press RECORD or the space bar to start.');
+    renderSourceBadge();  // ESP32 offline -> RECORD stays disabled
     updateControls();
   }
 
   async function toggleRecord() {
     if (state.reviewMode) return;
-    const pi = state.source === 'pi_i2s';
+    const server = isServerSource(state.source);
     if (state.mode === 'idle') {
+      if (els.recordBtn.disabled) return;  // e.g. Space while the ESP32 is offline
       setSourceLocked(true);
-      await (pi ? piStart() : startRecording());
+      await (server ? serverStart() : startRecording());
       if (state.mode === 'idle') setSourceLocked(false);  // start failed
     } else if (state.mode === 'recording') {
-      await (pi ? piStop() : stopRecording());
+      await (server ? serverStop() : stopRecording());
     }
   }
 
@@ -999,8 +1050,9 @@
         r.addEventListener('change', () => { setSource(r.value); r.blur(); });
       });
     }
-    setSource(availableSources().length ? preferredSource() : 'browser', false);
-    if (piMicAvailable) resumePiRecording();
+    setSource(preferredSource(), false);
+    setInterval(() => { if (state.mode === 'idle') refreshEsp32Status(); }, ESP32_STATUS_MS);
+    resumeServerRecording();
   }
 
   init();
