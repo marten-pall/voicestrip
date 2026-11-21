@@ -72,7 +72,7 @@ class MelSpectrogramExtractor(FeatureExtractor):
         self.log_eps = cfg.log_eps
         self.mel = T.MelSpectrogram(
             sample_rate=sample_rate, n_fft=cfg.n_fft, win_length=cfg.win_length,
-            hop_length=cfg.hop_length, n_mels=cfg.n_mels,
+            hop_length=cfg.hop_length, n_mels=cfg.n_mels, center=cfg.center,
         )
 
     def compute(self, wav: torch.Tensor) -> torch.Tensor:
@@ -85,7 +85,7 @@ class MFCCExtractor(FeatureExtractor):
         self.mfcc = T.MFCC(
             sample_rate=sample_rate, n_mfcc=cfg.n_mfcc, log_mels=True,
             melkwargs={"n_fft": cfg.n_fft, "win_length": cfg.win_length,
-                       "hop_length": cfg.hop_length, "n_mels": cfg.n_mels},
+                       "hop_length": cfg.hop_length, "n_mels": cfg.n_mels, "center": cfg.center},
         )
 
     def compute(self, wav: torch.Tensor) -> torch.Tensor:

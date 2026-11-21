@@ -95,7 +95,7 @@ class ModelConfig:
     })
 ```
 
-`num_classes` lisatakse automaatselt — see on klasside arv `data.classes`-is (praegu 5). Kui paned selle
+`num_classes` lisatakse automaatselt — see on klasside arv `data.classes`-is (vaikimisi 4: `kone, sisse, taust, valja`). Kui paned selle
 ise `model.args` alla ja see ei klapi, annab treening vea.
 
 Train:
@@ -119,7 +119,7 @@ tehakse täpselt nii suur, teiste siltide klipid jäetakse välja:
 @dataclass
 class DataConfig:
     ...
-    classes: list[str] | None = field(default_factory=lambda: ["kone", "punane", "sisse", "taust", "valja"])  # None = kõik 12
+    classes: list[str] | None = field(default_factory=lambda: ["kone", "sisse", "taust", "valja"])  # None = kõik 12
 ```
 
 või ilma configi muutmata:
@@ -163,8 +163,9 @@ Kõik võtmed on kohustuslikud — puuduv või valesti kirjutatud võti annab ko
 
 - **data** — CSV ja klippide asukoht, `classes` (alamhulk või `null`), `split_by` (vt ülal), diskreetimissagedus, klipi pikkus (lühem → nullidega, pikem → keskelt lõigatud),
   val/test osakaal, seeme, DataLoaderi töötajad. Klassid, kus on alla 3 klipi, lähevad ainult treeningusse.
-- **features** — `melspec` või `mfcc`, FFT/akna/hüppe parameetrid, normaliseerimine
-  (keskmine/std arvutatakse treeninghulgalt ja salvestatakse kontrollpunkti).
+- **features** — `melspec` (ESP32 toetab ainult seda) või `mfcc`, FFT/akna/hüppe parameetrid, normaliseerimine
+  (keskmine/std arvutatakse treeninghulgalt ja salvestatakse kontrollpunkti). Vaikimisi `n_fft=512`,
+  aken 400, hüpe 160, `center=false` → 40 × 97 tunnust 1 s kohta; ESP32 arvutab täpselt sama (vt Eksport).
 - **augment** — ainult treeningul: ajanihe, helitugevus, `taust` klippide segamine juhusliku SNR-iga,
   SpecAugment (sagedus- ja ajamaskid). `enabled: false` lülitab kõik välja.
 - **model** — registri nimi + konstruktori argumendid. `num_classes` tuletatakse `data.classes`-ist, configis seda pole.
@@ -173,16 +174,33 @@ Kõik võtmed on kohustuslikud — puuduv või valesti kirjutatud võti annab ko
 - **logging** — jooksu nimi, kaust, batch-logi sagedus, TensorBoard (`pip install tensorboard`),
   `save_best_only: false` salvestab iga epohhi.
 
+## Eksport ESP32-le
+
+```bash
+pip install litert-torch          # Linux / WSL, Python 3.12
+python export.py --checkpoint runs/<run>/best.pt
+python export.py --checkpoint runs/<run>/best.pt --features-only   # ilma TFLite'ita (töötab ka Windowsis)
+```
+
+`export.py`:
+
+1. ehitab firmware tunnuste algoritmi (`FirmwareFeatures`, sama mis `esp32/voicestrip/kws.cpp`) ja võrdleb
+   seda treeneri extractoriga päris klippidel (lubatud max erinevus 1e-3, tavaliselt ~1e-6);
+2. kvantiseerib mudeli int8-ks (pt2e, kalibreerimine ~300 treeningklipiga; `--float` = float32) ja
+   võrdleb TFLite ja PyTorchi täpsust testijaotusel;
+3. kirjutab `esp32/voicestrip/features.h`, `model_data.h`, `test_clip.h` ning `models/voicestrip.{pt,tflite}`.
+
+Kolmel päisel on sama `EXPORT_ID` ja firmware ei kompileeru, kui need on eri ekspordist. `test_clip.h`
+abil kontrollib firmware (`KWS_SELFTEST 1`), et seadmes tulevad samad tunnused ja tõenäosused.
+
+Firmware toetab mudeli ope, mis on `kws.cpp` resolveris (Conv2D, MaxPool, Mean, FullyConnected, ReLU,
+Reshape, Transpose, Quantize, …). Uue kihi lisamisel prindib eksport TFLite op-ide nimekirja; puuduv op
+tuleb lisada sinna.
+
 ## Teadmiseks
 
-- Sildid on failis `labels.py` (tähestikulises järjekorras, indeksid sõltuvad sellest) — hoia kooskõlas
-  kollektori `LABELS`-iga.
+- Sildid tulevad failist `../labels.json` (ühine kogujaga); indeksid on võtmete tähestikulises järjekorras.
+  Kontrollpunkt salvestab oma klassid (`classes`), eval ja eksport loevad need sealt.
 - Kollektoris võivad kastid kattuda. Kui sama salvestuse kattuvad klipid satuvad eri jaotustesse,
   võib testitäpsus olla optimistlik.
 - WAV-id loetakse standardse `wave` mooduliga (torchaudio ≥ 2.9 `load()` vajaks TorchCodecit + FFmpegi).
-
-## Edaspidi
-
-- ESP32 export: PyTorch → ONNX → TensorFlow Lite (int8 kvantimine) → TFLite Micro. Hoia mudel väike
-  (kümned tuhanded parameetrid), et see mikrokontrollerisse mahuks.
-- Tunnuste arvutus seadmes peab vastama `features` sektsioonile (sama mel-filterpank, hop, normaliseerimine).

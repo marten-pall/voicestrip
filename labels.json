@@ -1,0 +1,14 @@
+{
+  "sisse":    {"name": "sisse",    "color": "#2a9d8f"},
+  "valja":    {"name": "välja",    "color": "#9c6644"},
+  "punane":   {"name": "punane",   "color": "#d1495b"},
+  "roheline": {"name": "roheline", "color": "#52a35a"},
+  "sinine":   {"name": "sinine",   "color": "#3d74c9"},
+  "valge":    {"name": "valge",    "color": "#8fa9c4"},
+  "hajuv":    {"name": "hajuv",    "color": "#8e6cc9"},
+  "vilkuv":   {"name": "vilkuv",   "color": "#e07a3e"},
+  "heledam":  {"name": "heledam",  "color": "#c9a227"},
+  "tumedam":  {"name": "tumedam",  "color": "#4a4e69"},
+  "taust":    {"name": "taust",    "color": "#7a6f62"},
+  "kone":     {"name": "kõne",     "color": "#7b4b94"}
+}

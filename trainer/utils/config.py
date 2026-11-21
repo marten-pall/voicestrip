@@ -48,9 +48,12 @@ class DataConfig:
 class FeaturesConfig:
     type: str = "melspec"       # melspec | mfcc
     n_mels: int = 40
-    n_fft: int = 400            # 25 ms at 16 kHz
-    hop_length: int = 160       # 10 ms at 16 kHz -> 101 frames per 1 s clip
-    win_length: int = 400
+    # The ESP32 firmware recomputes these features in C++ (export.py writes features.h), so
+    # keep them easy to reproduce: power-of-two FFT and no centre padding.
+    n_fft: int = 512            # FFT size (esp-dsp needs a power of two); the 400-sample window is zero-padded
+    hop_length: int = 160       # 10 ms at 16 kHz -> 1 + (16000 - 512) // 160 = 97 frames per 1 s clip
+    win_length: int = 400       # 25 ms Hann window
+    center: bool = False        # True would reflect-pad the clip edges (harder to match on the ESP32)
     n_mfcc: int = 13            # only used when type == mfcc
     log_eps: float = 1.0e-6     # log(mel + eps) for melspec
     normalize: bool = True      # per-feature standardization (mean/std over the training set)
@@ -82,8 +85,9 @@ class ModelConfig:
     # Keyword arguments for MyModel(...) - the names must match the parameters of MyModel.__init__
     # (with **kwargs, unknown ones are silently ignored). num_classes is added automatically.
     args: dict[str, Any] = field(default_factory=lambda: {
-          # filters per conv block (one block = conv -> BN -> ReLU -> pool)
+        "channels": 64,             # filters in both conv blocks (conv -> BN -> ReLU)
         "kernel_size": 3,           # conv kernel size
+        "pool_size": 2,             # max-pool after the first block
         "dropout": 0.2,             # before the final linear layer; 0.2 worked best on this data so far
     })
 

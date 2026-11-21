@@ -15,7 +15,6 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from features import FeatureExtractor, get_extractor
-from labels import LABELS
 from models import get_model
 from utils.config import Config, TrainingConfig, config_from_dict
 from utils.seed import seed_worker
@@ -194,9 +193,6 @@ def load_checkpoint(path: Path, device: torch.device, base_dir: Path,
     (e.g. to point data paths elsewhere); features/model sections must stay compatible."""
     ckpt = torch.load(path, map_location=device, weights_only=False)
     raw = copy.deepcopy(raw_config or ckpt["config"])
-    # Checkpoints from before data.classes existed: all labels of that time, stored under "labels".
-    ckpt.setdefault("classes", ckpt.get("labels", LABELS))
-    raw["data"].setdefault("split_by", "clip")  # checkpoints from before split_by: per-clip splits
     raw["data"]["classes"] = ckpt["classes"]  # the trained head defines the classes, not a swapped config
     cfg = config_from_dict(raw, base_dir)
 

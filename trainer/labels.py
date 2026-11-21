@@ -1,25 +1,18 @@
-"""Class labels shared with the collector app (ASCII keys, as used in its CSV and folders).
+"""Class labels, read from ../labels.json (shared with the collector app: same ASCII keys
+as its CSV and clip folders).
 
-Index mapping is the alphabetical order of this list - never reorder or a trained
-checkpoint's class indices stop matching. Keep in sync with `LABELS` in the collector's app.py.
+Index mapping is the alphabetical order of the keys, so it never depends on the file's
+order. A trained checkpoint stores its own class list (`classes`), which is what eval and
+export use.
 """
 
-LABELS: list[str] = sorted([
-    "hajuv",
-    "heledam",
-    "kone",
-    "punane",
-    "roheline",
-    "sinine",
-    "sisse",
-    "taust",
-    "tumedam",
-    "valge",
-    "valja",
-    "vilkuv",
-])
+import json
+from pathlib import Path
 
-assert len(LABELS) == len(set(LABELS)) == 12, "LABELS must contain 12 unique keys"
+LABEL_FILE = Path(__file__).resolve().parent.parent / "labels.json"
+LABELS: list[str] = sorted(json.loads(LABEL_FILE.read_text(encoding="utf-8")))
+
+assert len(LABELS) == len(set(LABELS)) >= 2, f"{LABEL_FILE} must define at least 2 unique labels"
 
 
 def resolve_classes(selected: list[str] | None) -> list[str]:

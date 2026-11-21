@@ -1,8 +1,8 @@
-// Server-side mic calibration page (Pi I2S or ESP32): live peak meter (short poll) + 3 s test recording.
+// ESP32 mic calibration page: live peak meter (short poll) + 3 s test recording.
 (() => {
   'use strict';
 
-  const { apiBase } = window.MIC_TEST;  // '/api/pi' | '/api/esp32'
+  const API = '/api/esp32';
   const POLL_MS = 100;
   const QUIET = 0.01;
   const CLIPPING = 0.9;
@@ -11,7 +11,7 @@
     error: $('error'), value: $('peak-value'), db: $('peak-db'), bar: $('peak-bar'), hint: $('peak-hint'),
     rtt: $('rtt'), lag: $('lag'),
     testBtn: $('test-btn'), testStatus: $('test-status'), audio: $('test-audio'),
-    deviceLine: $('device-line'), deviceOffline: $('device-offline'),  // ESP32 page only
+    deviceLine: $('device-line'), deviceOffline: $('device-offline'),
   };
   let polling = false;
   let paused = false;
@@ -33,7 +33,7 @@
   }
 
   function renderDevice(device) {
-    if (!els.deviceLine || !device) return;
+    if (!device) return;
     els.deviceOffline.classList.toggle('hidden', device.online);
     els.testBtn.disabled = !device.online || paused;
     const details = [device.ip, device.rssi && `${device.rssi} dBm`, device.fw,
@@ -48,7 +48,7 @@
     polling = true;
     try {
       const t0 = performance.now();
-      const res = await fetch(`${apiBase}/peak`);
+      const res = await fetch(`${API}/peak`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       els.rtt.textContent = Math.round(performance.now() - t0);
@@ -68,7 +68,7 @@
     els.testBtn.disabled = true;
     els.testStatus.textContent = 'Salvestan… räägi nüüd';
     try {
-      const res = await fetch(`${apiBase}/test-record`, { method: 'POST' });
+      const res = await fetch(`${API}/test-record`, { method: 'POST' });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || `HTTP ${res.status}`);

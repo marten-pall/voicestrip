@@ -13,14 +13,13 @@
   const RECENT_COUNT = 10;
   const WORKLET_URL = '/static/worklet.js';
 
-  const { labels, colors, defaultLabel, reviewId, piMicAvailable } = window.APP;
+  const { labels, colors, defaultLabel, reviewId } = window.APP;
   const SOURCE_KEY = 'voicecollector.source';
   const SERVER_POLL_MS = 200;
   const ESP32_STATUS_MS = 2000;
   // Sources captured on the server side: the browser only starts/stops them, shows the
-  // level, and then loads the finished WAV into the same editor. Same API shape for both.
+  // level, and then loads the finished WAV into the same editor.
   const SERVER_SOURCES = {
-    pi_i2s: { api: '/api/pi', name: 'Pi I2S mikrofon', testUrl: '/pi-mic-test' },
     esp32: { api: '/api/esp32', name: 'ESP32 mikrofon', testUrl: '/esp32-mic-test' },
   };
   const BADGE_ON = ['border-emerald-200', 'bg-emerald-50', 'text-emerald-700'];
@@ -49,7 +48,7 @@
   const state = {
     mode: 'idle', // idle | recording | processing | editing | saving
     reviewMode: !!reviewId,
-    source: 'browser',      // 'browser' | 'pi_i2s' | 'esp32'
+    source: 'browser',      // 'browser' | 'esp32'
     esp32Online: false,
     srvPollId: null,
     srvPolling: false,
@@ -337,6 +336,7 @@
         duration_sec: state.duration,
         clips: [],
       }, data.waveform);
+      if (data.csv_warning) showError('Salvestus on kettal, aga recordings.csv jäi uuendamata.', data.csv_warning);
       loadRecent();
     } catch (err) {
       showError('Upload failed.', String(err.message || err));
@@ -365,7 +365,7 @@
     }
   }
 
-  // Load a recording that already exists on the server (review mode, finished Pi/ESP32 recording).
+  // Load a recording that already exists on the server (review mode, finished ESP32 recording).
   async function openInEditor(meta) {
     showEditorShell();
     const res = await fetch(`/recordings/${meta.original_path.split('/').map(encodeURIComponent).join('/')}`);
@@ -377,8 +377,8 @@
     enterEditor(meta, computePeaks(state.samples, state.view.peakCount));
   }
 
-  // --------------------------------------------- server-side sources (Pi I2S, ESP32)
-  // Audio is captured on the server (Pi) or streamed to it over WiFi (ESP32); the browser
+  // ---------------------------------------------------- server-side source (ESP32)
+  // Audio is streamed to the server over WiFi (ESP32); the browser
   // only starts/stops it, shows the level, and then loads the finished WAV into the same editor.
 
   const isServerSource = (source) => source in SERVER_SOURCES;
@@ -512,8 +512,8 @@
     const source = state.source;
     els.sourceBadge.classList.toggle('hidden', !isServerSource(source));
     if (!isServerSource(source)) return;
-    const on = source === 'pi_i2s' || state.esp32Online;
-    els.sourceBadge.textContent = source === 'pi_i2s' ? 'Pi mic active' : (on ? 'ESP32 võrgus' : 'ESP32 ei ole võrgus');
+    const on = state.esp32Online;
+    els.sourceBadge.textContent = on ? 'ESP32 võrgus' : 'ESP32 ei ole võrgus';
     els.sourceBadge.classList.remove(...(on ? BADGE_OFF : BADGE_ON));
     els.sourceBadge.classList.add(...(on ? BADGE_ON : BADGE_OFF));
     if (state.mode === 'idle') els.recordBtn.disabled = !on;
@@ -526,7 +526,6 @@
   function availableSources() {
     const list = [];
     if (window.isSecureContext) list.push('browser');
-    if (piMicAvailable) list.push('pi_i2s');
     list.push('esp32');
     return list;
   }
@@ -536,7 +535,7 @@
     let saved = null;
     try { saved = localStorage.getItem(SOURCE_KEY); } catch (_) { /* storage blocked */ }
     if (available.includes(saved)) return saved;
-    return ['pi_i2s', 'browser', 'esp32'].find((s) => available.includes(s));
+    return available[0];
   }
 
   function setSource(source, persist = true) {

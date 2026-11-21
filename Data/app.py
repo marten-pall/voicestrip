@@ -2,21 +2,20 @@
 
 Single-user Flask app. Records 16 kHz mono PCM from one of these sources:
   - "browser": Web Audio API in the user's browser (needs HTTPS or localhost)
-  - "pi_i2s":  INMP441 I2S mic read on the server via sounddevice (Raspberry Pi only, see pi_mic.py)
-  - "esp32":   ESP32-S3 + INMP441 streaming over WiFi (see esp32_link.py, ../esp32/collector/)
+  - "esp32":   ESP32-S3 + INMP441 streaming over WiFi (see esp32_link.py and
+               ../esp32/voicestrip/ built with COLLECTOR_MODE 1)
 stores the full recording as WAV and slices labelled 1.0 s clips from it.
 Storage is plain files + CSV (no database).
 
-cd ~/voicestrip/Data
-source venv/bin/activate
-python app.py --host 0.0.0.0
-
+    python app.py --host 0.0.0.0
 """
 
 import argparse
 import csv
 import io
+import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -29,43 +28,17 @@ from pathlib import Path
 from flask import Flask, Response, abort, jsonify, render_template, request, send_from_directory
 
 import esp32_link
-import pi_mic
 
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
 
-# Internal key (ASCII, used in paths + CSV) -> display name (Estonian)
-LABELS = {
-    "sisse": "sisse",
-    "valja": "välja",
-    "punane": "punane",
-    "roheline": "roheline",
-    "sinine": "sinine",
-    "valge": "valge",
-    "hajuv": "hajuv",
-    "vilkuv": "vilkuv",
-    "heledam": "heledam",
-    "tumedam": "tumedam",
-    "taust": "taust",
-    "kone": "kõne",
-}
-
-# Muted, distinct colour per label - shared by every page via the template context
-LABEL_COLORS = {
-    "sisse": "#2a9d8f",
-    "valja": "#9c6644",
-    "punane": "#d1495b",
-    "roheline": "#52a35a",
-    "sinine": "#3d74c9",
-    "valge": "#8fa9c4",
-    "hajuv": "#8e6cc9",
-    "vilkuv": "#e07a3e",
-    "heledam": "#c9a227",
-    "tumedam": "#4a4e69",
-    "taust": "#7a6f62",
-    "kone": "#7b4b94",
-}
+BASE_DIR = Path(__file__).resolve().parent
+# Shared with the trainer: ASCII key (paths, CSV, model classes) -> display name + UI colour
+LABEL_FILE = BASE_DIR.parent / "labels.json"
+_label_defs: dict[str, dict] = json.loads(LABEL_FILE.read_text(encoding="utf-8"))
+LABELS = {key: d["name"] for key, d in _label_defs.items()}
+LABEL_COLORS = {key: d["color"] for key, d in _label_defs.items()}
 
 DEFAULT_LABEL = "punane"
 SAMPLE_RATE = 16000
@@ -74,13 +47,12 @@ CHANNELS = 1
 CLIP_SEC = 1.0
 SNAP_SEC = 0.05
 DEFAULT_PEAKS = 2000
-SOURCES = ("browser", "pi_i2s", "esp32")
-PI_TEST_SECONDS = 3.0
+SOURCES = ("browser", "esp32")
+MIC_TEST_SECONDS = 3.0
 ESP32_MAX_CHUNK_BYTES = 256 * 1024
 # The ESP32 polls several times a second - successful device requests stay out of the console
 QUIET_LOG_PATHS = ("/api/esp32/poll", "/api/esp32/chunk", "/api/esp32/status")
 
-BASE_DIR = Path(__file__).resolve().parent
 REC_DIR = BASE_DIR / "recordings"
 ORIGINAL_DIR = REC_DIR / "original"
 CLIPS_DIR = REC_DIR / "clips"
@@ -103,7 +75,6 @@ app = Flask(__name__)
 app.json.sort_keys = False
 app.jinja_env.policies["json.dumps_kwargs"] = {"sort_keys": False}
 _lock = threading.Lock()  # serialises CSV writes and recording-id allocation
-mic = pi_mic.PiMic(pi_mic.detect_pi_mic())  # .available can turn False at runtime (see self_test)
 esp32 = esp32_link.Esp32Link()
 
 
@@ -145,10 +116,13 @@ def append_csv(path: Path, fields: list[str], rows: list[dict]) -> None:
 
 
 def write_csv(path: Path, fields: list[str], rows: list[dict]) -> None:
-    with path.open("w", newline="", encoding="utf-8-sig") as f:
+    """Rewrite a whole CSV atomically: a crash mid-write never leaves a truncated file."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
+    os.replace(tmp, path)  # fails (and keeps the old file) if e.g. Excel holds a lock on it
 
 
 def rel_path(path: Path) -> str:
@@ -174,8 +148,9 @@ def next_recording_id() -> str:
     """YYYYMMDD_NNN with NNN = 1 + highest counter used today."""
     prefix = datetime.now().strftime("%Y%m%d")
     used = [path.stem for path in ORIGINAL_DIR.glob(f"{prefix}_*.wav")]
-    # Pi / ESP32 recording in progress: its WAV doesn't exist yet
-    used += [rid for rid in (mic.active_recording_id(), esp32.active_recording_id()) if rid]
+    active = esp32.active_recording_id()  # ESP32 recording in progress: its WAV doesn't exist yet
+    if active:
+        used.append(active)
     highest = 0
     for stem in used:
         parts = stem.split("_")
@@ -306,8 +281,7 @@ def snap_and_clamp(start_sec: float, duration_sec: float) -> float:
 
 @app.context_processor
 def inject_labels():
-    return {"labels": LABELS, "label_colors": LABEL_COLORS, "default_label": DEFAULT_LABEL,
-            "pi_mic_available": mic.available}
+    return {"labels": LABELS, "label_colors": LABEL_COLORS, "default_label": DEFAULT_LABEL}
 
 
 @app.get("/")
@@ -320,18 +294,9 @@ def playback_page():
     return render_template("playback.html", active="playback")
 
 
-@app.get("/pi-mic-test")
-def pi_mic_test_page():
-    return render_template("mic_test.html", active="recorder", source="pi_i2s", api_base="/api/pi",
-                           mic_title="Pi I2S mikrofon", available=mic.available, test_seconds=PI_TEST_SECONDS,
-                           devices=pi_mic.input_devices() if not mic.available else [])
-
-
 @app.get("/esp32-mic-test")
 def esp32_mic_test_page():
-    return render_template("mic_test.html", active="recorder", source="esp32", api_base="/api/esp32",
-                           mic_title="ESP32 + INMP441 mikrofon", available=True, test_seconds=PI_TEST_SECONDS,
-                           devices=[])
+    return render_template("mic_test.html", active="recorder", test_seconds=MIC_TEST_SECONDS)
 
 
 @app.get("/review/<recording_id>")
@@ -365,8 +330,13 @@ def parse_peaks(value, default: int = DEFAULT_PEAKS) -> int:
 def store_recording(pcm: bytes, name: str, default_label: str, source: str,
                     recording_id: str | None = None) -> dict:
     """Write an original WAV + its recordings.csv row. Shared by every source.
-    `recording_id` is passed when it was reserved earlier (Pi recordings)."""
+    `recording_id` is passed when it was reserved earlier (ESP32 recordings).
+
+    The WAV is written first and kept even if the CSV row can't be added (e.g. Excel
+    has recordings.csv locked): the audio is the valuable part and review still works.
+    """
     name = name.strip() or datetime.now().strftime("%Y-%m-%d %H:%M")
+    warning = None
     with _lock:
         ensure_dirs()
         recording_id = recording_id or next_recording_id()
@@ -374,23 +344,27 @@ def store_recording(pcm: bytes, name: str, default_label: str, source: str,
         path = ORIGINAL_DIR / f"{recording_id}_{slugify(name)}.wav"
         write_wav(path, pcm)
         duration = len(pcm) / (SAMPLE_WIDTH * CHANNELS * SAMPLE_RATE)
-        append_csv(RECORDINGS_CSV, RECORDING_FIELDS, [{
-            "recording_id": recording_id,
-            "recording_name": name,
-            "default_label": default_label,
-            "duration_sec": f"{duration:.3f}",
-            "original_path": rel_path(path),
-            "source": source,
-            "created_at": now_iso(),
-        }])
-    return {"recording_id": recording_id, "recording_name": name,
-            "duration_sec": round(duration, 3), "original_path": rel_path(path)}
+        try:
+            append_csv(RECORDINGS_CSV, RECORDING_FIELDS, [{
+                "recording_id": recording_id,
+                "recording_name": name,
+                "default_label": default_label,
+                "duration_sec": f"{duration:.3f}",
+                "original_path": rel_path(path),
+                "source": source,
+                "created_at": now_iso(),
+            }])
+        except OSError as exc:
+            warning = f"recordings.csv rida jäi lisamata ({exc}) - kas fail on Excelis lahti?"
+            print(f"WARNING {recording_id}: {warning}", flush=True)
+    return {"recording_id": recording_id, "recording_name": name, "duration_sec": round(duration, 3),
+            "original_path": rel_path(path), "csv_warning": warning}
 
 
 @app.post("/api/upload-recording")
 def upload_recording():
     # Raw Int16 PCM body + query-string fields (browser), or multipart with an
-    # 'audio' file + form fields (handy for future ESP32 uploads).
+    # 'audio' file + form fields (e.g. curl uploads of an existing WAV's PCM).
     if "audio" in request.files:
         pcm = request.files["audio"].read()
         fields = request.form
@@ -410,80 +384,9 @@ def upload_recording():
     return jsonify({**result, "waveform": compute_peaks(pcm, parse_peaks(fields.get("peaks")))})
 
 
-# --------------------------------------------------------------------------- #
-# Pi I2S microphone (server-side recording)
-# --------------------------------------------------------------------------- #
-
 @app.get("/api/sources")
 def list_sources():
-    return jsonify({"browser": True, "pi_i2s": mic.available, "esp32": esp32.online})
-
-
-def pi_error(exc: Exception):
-    """PiMicError = expected (409); anything else = hardware/driver failure, never a crash."""
-    if isinstance(exc, pi_mic.PiMicError):
-        return api_error(str(exc), 409)
-    print(f"Pi mic error: {type(exc).__name__}: {exc}", flush=True)
-    return api_error(f"Mikrofoni viga: {exc}. Kontrolli juhtmeid ja I2S seadistust (/pi-mic-test).", 503)
-
-
-@app.post("/api/pi/start-recording")
-def pi_start_recording():
-    if not mic.available:
-        return api_error("Pi I2S mikrofoni pole sellel seadmel saadaval", 404)
-    data = request.get_json(silent=True) or {}
-    default_label = str(data.get("default_label") or DEFAULT_LABEL)
-    if default_label not in LABELS:
-        return api_error(f"Unknown label: {default_label}")
-    try:
-        with _lock:  # reserve the id while the stream opens
-            recording_id = next_recording_id()
-            started_at = mic.start(recording_id, str(data.get("name") or ""), default_label)
-    except Exception as exc:  # noqa: BLE001
-        return pi_error(exc)
-    print(f"Started Pi recording {recording_id}", flush=True)
-    return jsonify({"recording_id": recording_id, "started_at": started_at})
-
-
-@app.get("/api/pi/recording-status")
-def pi_recording_status():
-    return jsonify(mic.status())
-
-
-@app.post("/api/pi/stop-recording")
-def pi_stop_recording():
-    data = request.get_json(silent=True) or {}
-    recording_id = str(data.get("recording_id", ""))
-    try:
-        audio, meta = mic.stop(recording_id)
-    except Exception as exc:  # noqa: BLE001
-        return pi_error(exc)
-    pcm = pi_mic.to_pcm16(audio)
-    result = store_recording(pcm, meta["name"], meta["default_label"], "pi_i2s", recording_id=recording_id)
-    print(f"Stopped Pi recording {recording_id} ({result['duration_sec']:.1f} s)"
-          + (f" - {meta['warning']}" if meta["warning"] else ""), flush=True)
-    return jsonify({**result, "warning": meta["warning"],
-                    "waveform": compute_peaks(pcm, parse_peaks(data.get("peaks")))})
-
-
-@app.get("/api/pi/peak")
-def pi_peak():
-    try:
-        return jsonify({"peak": round(mic.current_peak(), 4), "recording": mic.active_recording_id() is not None,
-                        "buffer_lag_ms": mic.current_lag_ms()})
-    except Exception as exc:  # noqa: BLE001
-        return pi_error(exc)
-
-
-@app.post("/api/pi/test-record")
-def pi_test_record():
-    """Records PI_TEST_SECONDS and returns the WAV directly (nothing is saved)."""
-    try:
-        audio = mic.test_record(PI_TEST_SECONDS)
-    except Exception as exc:  # noqa: BLE001
-        return pi_error(exc)
-    peak = float(abs(audio).max()) if len(audio) else 0.0
-    return Response(pi_mic.wav_bytes(audio), mimetype="audio/wav", headers={"X-Peak": f"{peak:.4f}"})
+    return jsonify({"browser": True, "esp32": esp32.online})
 
 
 # --------------------------------------------------------------------------- #
@@ -566,7 +469,8 @@ def esp32_stop_recording():
     result = store_recording(pcm, meta["name"], meta["default_label"], "esp32", recording_id=recording_id)
     print(f"Stopped ESP32 recording {recording_id} ({result['duration_sec']:.1f} s)"
           + (f" - {meta['warning']}" if meta["warning"] else ""), flush=True)
-    return jsonify({**result, "warning": meta["warning"],
+    warning = "; ".join(w for w in (meta["warning"], result.pop("csv_warning")) if w) or None
+    return jsonify({**result, "warning": warning,
                     "waveform": compute_peaks(pcm, parse_peaks(data.get("peaks")))})
 
 
@@ -579,9 +483,9 @@ def esp32_peak():
 
 @app.post("/api/esp32/test-record")
 def esp32_test_record():
-    """Records PI_TEST_SECONDS from the ESP32 and returns the WAV directly (nothing is saved)."""
+    """Records MIC_TEST_SECONDS from the ESP32 and returns the WAV directly (nothing is saved)."""
     try:
-        pcm = esp32.test_record(PI_TEST_SECONDS)
+        pcm = esp32.test_record(MIC_TEST_SECONDS)
     except Exception as exc:  # noqa: BLE001
         return esp32_error(exc)
     return Response(wav_bytes(pcm), mimetype="audio/wav", headers={"X-Peak": f"{esp32_link.pcm_peak(pcm):.4f}"})
@@ -641,7 +545,15 @@ def save_clips():
                 "source": source,
                 "created_at": now_iso(),
             })
-        append_csv(LABELS_CSV, CLIP_FIELDS, rows)
+        try:
+            append_csv(LABELS_CSV, CLIP_FIELDS, rows)
+        except OSError as exc:
+            # No CSV row -> no clip: remove this batch's WAVs so nothing is left orphaned.
+            # The boxes are still unsaved in the browser, so the user can simply retry.
+            for row in rows:
+                (REC_DIR / row["clip_path"]).unlink(missing_ok=True)
+            return api_error(f"labels.csv ei saanud kirjutada ({exc}). Kas fail on Excelis lahti? "
+                             "Sulge see ja salvesta uuesti.", 409)
 
     return jsonify({
         "saved_count": len(rows),
@@ -782,11 +694,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     ensure_dirs()
-    mic.self_test()
     print()
     print("  Voice Collector")
     print(f"  Salvestused: {REC_DIR}")
-    print(f"  Pi I2S mikrofon: {'olemas' if mic.available else 'ei ole (ainult brauseri mikrofon)'}")
     if args.host == "0.0.0.0":
         print(f"  ESP32 mikrofon: config.h -> SERVER_HOST \"{lan_address() or '<selle-masina-ip>'}\", "
               f"SERVER_PORT {args.port}  (test: /esp32-mic-test)")

@@ -28,16 +28,11 @@
       <label id="source-browser-label" class="inline-flex items-center gap-2 cursor-pointer">
         <input type="radio" name="source" value="browser" class="accent-indigo-600"> Brauseri mikrofon
       </label>
-      {% if pi_mic_available %}
-      <label class="inline-flex items-center gap-2 cursor-pointer">
-        <input type="radio" name="source" value="pi_i2s" class="accent-indigo-600"> Pi I2S mikrofon
-      </label>
-      {% endif %}
       <label class="inline-flex items-center gap-2 cursor-pointer">
         <input type="radio" name="source" value="esp32" class="accent-indigo-600"> ESP32 mikrofon
         <span id="esp32-dot" class="inline-block h-2 w-2 rounded-full bg-slate-300" title="ESP32 ei ole võrgus"></span>
       </label>
-      <a id="mic-test-link" href="/pi-mic-test" class="hidden text-indigo-600 hover:underline">Mikrofoni test →</a>
+      <a id="mic-test-link" href="/esp32-mic-test" class="hidden text-indigo-600 hover:underline">Mikrofoni test →</a>
     </div>
     {% endif %}
     <div class="flex flex-wrap items-end gap-4">

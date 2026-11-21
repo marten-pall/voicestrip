@@ -1,6 +1,6 @@
-"""Audio streamed over WiFi from an ESP32-S3 + INMP441 (sketch: ../esp32/collector/).
+"""Audio streamed over WiFi from an ESP32-S3 + INMP441 (../esp32/voicestrip/, COLLECTOR_MODE 1).
 
-Plain state code (no Flask), like pi_mic.py. The ESP32 is always the HTTP client,
+Plain state code (no Flask). The ESP32 is always the HTTP client,
 so it works behind any router without the server knowing its address:
 
   idle       GET  /api/esp32/poll?rssi=..&fw=..          every ~300 ms (also the heartbeat)
